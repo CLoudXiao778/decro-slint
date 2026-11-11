@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- 播放页/详情页的背景模糊改为 640x400 生成，使用 `image` crate 的 fast Gaussian/box blur，并显式开启 smooth 缩放，避免低分辨率背景放大后的块状感
+- 调亮播放页/详情页的封面遮罩，让模糊背景真正可见
+- 说明：这是对封面图做真实算法模糊；Slint 软件渲染器仍不支持对面板背后的整个实时 UI 做 backdrop-filter
+
 ## 0.2.2
 
 - 修复搜索页布局：HorizontalLayout 的 alignment 误用为主轴对齐，导致搜索图标居中、输入框宽度变成 0、无法输入

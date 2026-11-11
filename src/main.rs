@@ -374,8 +374,10 @@ fn update_ui<F: FnOnce(&AppWindow) + Send + 'static>(ui: &Weak<AppWindow>, f: F)
 
 fn blurred_backdrop(path: &std::path::Path) -> Option<Image> {
     let source = image::open(path).ok()?;
-    let small = source.resize_to_fill(180, 180, image::imageops::FilterType::Triangle);
-    let blurred = small.blur(14.0);
+    // Generate the blur at a size that still looks smooth when stretched to
+    // the window. A 24/180px source is what made the old backdrop look blocky.
+    let small = source.resize_to_fill(640, 400, image::imageops::FilterType::Triangle);
+    let blurred = small.fast_blur(24.0);
     let rgba = blurred.to_rgba8();
     let (width, height) = rgba.dimensions();
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
