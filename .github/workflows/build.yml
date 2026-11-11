@@ -1,0 +1,39 @@
+name: slint-portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*-slint"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Package portable
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/decro-slint.exe "dist/Decro Slint.exe" -Force
+          Copy-Item README.md "dist/README.md" -Force
+          Compress-Archive -Path "dist/*" -DestinationPath "Decro.Slint_${version}_portable_x64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decro-slint-windows
+          path: Decro.Slint_*_portable_x64.zip
+          if-no-files-found: error
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Decro.Slint_*_portable_x64.zip
