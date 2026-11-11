@@ -477,6 +477,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let player = Arc::new(Mutex::new(Player::default()));
     let lyrics = Arc::new(Mutex::new(Vec::<netease::LyricLine>::new()));
     let generation = Arc::new(AtomicU64::new(0));
+    let qr_generation = Arc::new(AtomicU64::new(0));
     let audio = spawn_audio();
     let volume = load_volume();
     ui.set_volume(volume);
@@ -490,12 +491,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let weak = weak.clone();
         let catalog = catalog.clone();
+        let qr_generation = qr_generation.clone();
         ui.on_refresh_qr(move || {
             let runtime = runtime.clone();
             let task_runtime = runtime.clone();
             let state = state.clone();
             let weak = weak.clone();
             let catalog = catalog.clone();
+            let qr_generation = qr_generation.clone();
+            let request = qr_generation.fetch_add(1, Ordering::Relaxed) + 1;
             runtime.spawn(async move {
                 match auth::qr_login_start(&state).await {
                     Ok(start) => {
@@ -509,8 +513,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let key = start.unikey;
                         loop {
                             tokio::time::sleep(Duration::from_millis(1800)).await;
+                            if qr_generation.load(Ordering::Relaxed) != request {
+                                break;
+                            }
                             match auth::qr_login_poll(&state, key.clone()).await {
                                 Ok(poll) => {
+                                    if qr_generation.load(Ordering::Relaxed) != request {
+                                        break;
+                                    }
                                     if let Some(account) = poll.account.clone() {
                                         update_ui(&weak, move |ui| {
                                             ui.set_logged_in(true);
@@ -594,6 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_login_open(true);
                     ui.set_account_name("".into());
                     ui.set_status_text("已退出登录".into());
+                    ui.invoke_refresh_qr();
                 });
             });
         });
@@ -865,9 +876,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     update_ui(&weak, move |ui| {
                         ui.set_login_open(true);
                         ui.set_status_text("请扫码登录，或导入网页版 Cookie".into());
+                        ui.invoke_refresh_qr();
                     });
                 }
-                Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
+                Err(error) => {
+                    update_ui(&weak, move |ui| {
+                        ui.set_login_open(true);
+                        ui.set_status_text(error.into());
+                        ui.invoke_refresh_qr();
+                    });
+                }
             }
         });
     }
