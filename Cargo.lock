@@ -1089,10 +1089,11 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "decro-slint"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "cc",
+ "image",
  "libc",
  "qrcode",
  "rand",

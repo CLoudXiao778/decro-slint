@@ -1,6 +1,6 @@
 [package]
 name = "decro-slint"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Decro Slint portable client"
 
@@ -20,6 +20,7 @@ slint = { version = "1.18", default-features = false, features = ["backend-winit
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "gzip", "stream", "blocking"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2"
 axum = "0.8"
 tokio = { version = "1", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }

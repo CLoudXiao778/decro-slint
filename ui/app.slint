@@ -657,6 +657,7 @@ export component AppWindow inherits Window {
     in property <float> duration;
     in-out property <float> volume: 0.64;
     in-out property <bool> player-open;
+    in-out property <bool> player-visible;
     in-out property <bool> lyrics-mode;
     in property <[LyricItem]> lyrics;
     in property <int> lyric-index;
@@ -695,7 +696,7 @@ export component AppWindow inherits Window {
     callback close-player();
 
     // Page transition is expressed with a soft opacity fade.
-    property <float> page-opacity: 1;
+    in-out property <float> page-opacity: 1;
 
     // Ambient wash behind the app shell.
     Rectangle {
@@ -930,6 +931,7 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 background: transparent;
                 opacity: root.page-opacity;
+                animate opacity { duration: 180ms; easing: ease-out; }
 
                 if root.page == "home" : ScrollView {
                     vertical-stretch: 1;
@@ -1448,7 +1450,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.2.0 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.2.1 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -1652,13 +1654,15 @@ export component AppWindow inherits Window {
     }
 
     // ── Full player ──────────────────────────────────────────────────────
-    if root.player-open : Rectangle {
+    if root.player-visible : Rectangle {
         x: 0;
         y: root.titlebar-height;
         width: root.width;
         height: root.height - root.titlebar-height;
         z: 40;
         background: #090a0c;
+        opacity: root.player-open ? 1 : 0;
+        animate opacity { duration: 220ms; easing: ease-out; }
 
         Image {
             x: -root.width * 0.08;

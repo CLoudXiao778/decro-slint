@@ -240,7 +240,11 @@ async fn load_playlist_covers(
     let semaphore = Arc::new(Semaphore::new(8));
     let mut tasks = JoinSet::new();
     for (index, playlist) in playlists.into_iter().take(limit).enumerate() {
-        let endpoint = cover_url(&playlist.cover_url, 120);
+        let size = match target {
+            PlaylistTarget::Home | PlaylistTarget::Search => 256,
+            PlaylistTarget::Library => 120,
+        };
+        let endpoint = cover_url(&playlist.cover_url, size);
         if endpoint.is_empty() {
             continue;
         }
@@ -314,7 +318,14 @@ async fn load_track_covers(
     let semaphore = Arc::new(Semaphore::new(8));
     let mut tasks = JoinSet::new();
     for (index, track) in tracks.into_iter().take(limit).enumerate() {
-        let endpoint = cover_url(&track.cover_url, 80);
+        let size = match target {
+            TrackTarget::Recent | TrackTarget::Daily | TrackTarget::New => {
+                if index < 40 { 256 } else { 120 }
+            }
+            TrackTarget::LibraryRecent | TrackTarget::Search => 120,
+            TrackTarget::Detail => 80,
+        };
+        let endpoint = cover_url(&track.cover_url, size);
         if endpoint.is_empty() {
             continue;
         }
@@ -357,6 +368,28 @@ fn update_ui<F: FnOnce(&AppWindow) + Send + 'static>(ui: &Weak<AppWindow>, f: F)
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = ui.upgrade() {
             f(&ui);
+        }
+    });
+}
+
+fn blurred_backdrop(path: &std::path::Path) -> Option<Image> {
+    let source = image::open(path).ok()?;
+    let small = source.resize_to_fill(180, 180, image::imageops::FilterType::Triangle);
+    let blurred = small.blur(14.0);
+    let rgba = blurred.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    buffer.make_mut_bytes().copy_from_slice(rgba.as_raw());
+    Some(Image::from_rgba8(buffer))
+}
+
+fn switch_page(ui: &AppWindow, page: &str) {
+    ui.set_page_opacity(0.0);
+    ui.set_page(page.into());
+    let handle = ui.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(16), move || {
+        if let Some(ui) = handle.upgrade() {
+            ui.set_page_opacity(1.0);
         }
     });
 }
@@ -680,17 +713,10 @@ fn start_track(
         let _ = audio.tx.send(AudioCmd::Load(bytes, duration));
         let id = track.id.clone();
         let cover_endpoint = cover_url(&track.cover_url, 500);
-        let backdrop_endpoint = cover_url(&track.cover_url, 24);
-        let (lyric_result, cover_path, backdrop_path) = tokio::join!(
+        let (lyric_result, cover_path) = tokio::join!(
             netease::lyric(&state, id),
             async {
                 tokio::time::timeout(Duration::from_secs(6), fetch_cover(&state, cover_endpoint))
-                    .await
-                    .ok()
-                    .flatten()
-            },
-            async {
-                tokio::time::timeout(Duration::from_secs(6), fetch_cover(&state, backdrop_endpoint))
                     .await
                     .ok()
                     .flatten()
@@ -718,17 +744,13 @@ fn start_track(
                 ui.set_lyric_scroll_y(0.0);
             });
         }
-        if cover_path.is_some() || backdrop_path.is_some() {
+        if let Some(path) = cover_path {
             update_ui(&ui, move |ui| {
-                if let Some(path) = cover_path {
-                    if let Ok(image) = Image::load_from_path(&path) {
-                        ui.set_current_cover_image(image);
-                    }
+                if let Ok(image) = Image::load_from_path(&path) {
+                    ui.set_current_cover_image(image);
                 }
-                if let Some(path) = backdrop_path {
-                    if let Ok(image) = Image::load_from_path(&path) {
-                        ui.set_current_backdrop(image);
-                    }
+                if let Some(backdrop) = blurred_backdrop(&path) {
+                    ui.set_current_backdrop(backdrop);
                 }
             });
         }
@@ -992,6 +1014,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generation = Arc::new(AtomicU64::new(0));
     let qr_generation = Arc::new(AtomicU64::new(0));
     let search_generation = Arc::new(AtomicU64::new(0));
+    let player_anim = Arc::new(AtomicU64::new(0));
     let prefs = Arc::new(Mutex::new(load_prefs()));
     let snapshot = prefs.lock().ok().map(|prefs| prefs.clone()).unwrap_or_default();
     let audio = spawn_audio();
@@ -1051,26 +1074,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_progress(0.0);
         ui.set_playing(false);
         let cover_endpoint = cover_url(&track.cover_url, 500);
-        let backdrop_endpoint = cover_url(&track.cover_url, 24);
-        if !cover_endpoint.is_empty() || !backdrop_endpoint.is_empty() {
+        if !cover_endpoint.is_empty() {
             let cover_state = state.clone();
             let cover_ui = weak.clone();
             runtime.spawn(async move {
-                let (cover_path, backdrop_path) = tokio::join!(
-                    fetch_cover(&cover_state, cover_endpoint),
-                    fetch_cover(&cover_state, backdrop_endpoint),
-                );
-                if cover_path.is_some() || backdrop_path.is_some() {
+                if let Some(path) = fetch_cover(&cover_state, cover_endpoint).await {
                     update_ui(&cover_ui, move |ui| {
-                        if let Some(path) = cover_path {
-                            if let Ok(image) = Image::load_from_path(&path) {
-                                ui.set_current_cover_image(image);
-                            }
+                        if let Ok(image) = Image::load_from_path(&path) {
+                            ui.set_current_cover_image(image);
                         }
-                        if let Some(path) = backdrop_path {
-                            if let Ok(image) = Image::load_from_path(&path) {
-                                ui.set_current_backdrop(image);
-                            }
+                        if let Some(backdrop) = blurred_backdrop(&path) {
+                            ui.set_current_backdrop(backdrop);
                         }
                     });
                 }
@@ -1218,7 +1232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_nav(move |page| {
             let page = page.to_string();
             if let Some(ui) = weak.upgrade() {
-                ui.set_page(page.clone().into());
+                switch_page(&ui, &page);
             }
             if page == "library" {
                 load_library(&runtime, state.clone(), weak.clone(), catalog.clone());
@@ -1241,10 +1255,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let request = search_generation.fetch_add(1, Ordering::Relaxed) + 1;
             let keyword = keyword.to_string();
             runtime.spawn(async move {
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_page("search".into());
+                update_ui(&weak, |ui| {
+                    switch_page(ui, "search");
                     ui.set_status_text("正在搜索…".into());
-                }
+                });
                 match netease::search_music(&state, keyword).await {
                     Ok(data) => {
                         if search_generation.load(Ordering::Relaxed) != request {
@@ -1311,7 +1325,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let description = playlist.description.clone();
                         let cover_tint = color_for(&playlist.id);
                         let cover_endpoint = cover_url(&playlist.cover_url, 500);
-                        let backdrop_endpoint = cover_url(&playlist.cover_url, 24);
                         let first_id = playlist
                             .tracks
                             .first()
@@ -1319,7 +1332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_default();
                         let detail_playlist = playlist.clone();
                         update_ui(&weak, move |ui| {
-                            ui.set_page("detail".into());
+                            switch_page(ui, "detail");
                             ui.set_detail_title(title.into());
                             ui.set_detail_meta(meta.into());
                             ui.set_detail_description(description.into());
@@ -1338,35 +1351,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             track_covers,
                             600,
                         ));
-                        if !cover_endpoint.is_empty() || !backdrop_endpoint.is_empty() {
+                        if !cover_endpoint.is_empty() {
                             let cover_state = state.clone();
                             let cover_ui = weak.clone();
                             let cover_title = playlist.name.clone();
                             tokio::spawn(async move {
-                                let (cover_path, backdrop_path) = tokio::join!(
-                                    tokio::time::timeout(
-                                        Duration::from_secs(8),
-                                        fetch_cover(&cover_state, cover_endpoint)
-                                    ),
-                                    tokio::time::timeout(
-                                        Duration::from_secs(8),
-                                        fetch_cover(&cover_state, backdrop_endpoint)
-                                    ),
-                                );
-                                let cover_path = cover_path.ok().flatten();
-                                let backdrop_path = backdrop_path.ok().flatten();
-                                if cover_path.is_some() || backdrop_path.is_some() {
+                                if let Some(path) = tokio::time::timeout(
+                                    Duration::from_secs(8),
+                                    fetch_cover(&cover_state, cover_endpoint),
+                                )
+                                .await
+                                .ok()
+                                .flatten()
+                                {
                                     update_ui(&cover_ui, move |ui| {
                                         if ui.get_detail_title().as_str() == cover_title {
-                                            if let Some(path) = cover_path {
-                                                if let Ok(image) = Image::load_from_path(&path) {
-                                                    ui.set_detail_cover_image(image);
-                                                }
+                                            if let Ok(image) = Image::load_from_path(&path) {
+                                                ui.set_detail_cover_image(image);
                                             }
-                                            if let Some(path) = backdrop_path {
-                                                if let Ok(image) = Image::load_from_path(&path) {
-                                                    ui.set_detail_backdrop(image);
-                                                }
+                                            if let Some(backdrop) = blurred_backdrop(&path) {
+                                                ui.set_detail_backdrop(backdrop);
                                             }
                                         }
                                     });
@@ -1417,7 +1421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let count = daily.len();
             let detail_tracks = daily.clone();
             update_ui(&weak, move |ui| {
-                ui.set_page("detail".into());
+                switch_page(ui, "detail");
                 ui.set_detail_title("每日推荐".into());
                 ui.set_detail_meta(format!("每天 6:00 更新 · {count} 首").into());
                 ui.set_detail_description("根据你的音乐口味每日更新".into());
@@ -1438,39 +1442,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             if let Some(track) = first {
                 let cover_endpoint = cover_url(&track.cover_url, 500);
-                let backdrop_endpoint = cover_url(&track.cover_url, 24);
-                if !cover_endpoint.is_empty() || !backdrop_endpoint.is_empty() {
+                if !cover_endpoint.is_empty() {
                     let cover_state = state.clone();
                     let cover_ui = weak.clone();
                     runtime.spawn(async move {
-                        let (cover_path, backdrop_path) = tokio::join!(
-                            tokio::time::timeout(
-                                Duration::from_secs(8),
-                                fetch_cover(&cover_state, cover_endpoint)
-                            ),
-                            tokio::time::timeout(
-                                Duration::from_secs(8),
-                                fetch_cover(&cover_state, backdrop_endpoint)
-                            ),
-                        );
-                        let cover_path = cover_path.ok().flatten();
-                        let backdrop_path = backdrop_path.ok().flatten();
-                        if cover_path.is_some() || backdrop_path.is_some() {
+                        if let Some(path) = tokio::time::timeout(
+                            Duration::from_secs(8),
+                            fetch_cover(&cover_state, cover_endpoint),
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                        {
                             update_ui(&cover_ui, move |ui| {
                                 if ui.get_page().as_str() != "detail"
                                     || ui.get_detail_title().as_str() != "每日推荐"
                                 {
                                     return;
                                 }
-                                if let Some(path) = cover_path {
-                                    if let Ok(image) = Image::load_from_path(&path) {
-                                        ui.set_detail_cover_image(image);
-                                    }
+                                if let Ok(image) = Image::load_from_path(&path) {
+                                    ui.set_detail_cover_image(image);
                                 }
-                                if let Some(path) = backdrop_path {
-                                    if let Ok(image) = Image::load_from_path(&path) {
-                                        ui.set_detail_backdrop(image);
-                                    }
+                                if let Some(backdrop) = blurred_backdrop(&path) {
+                                    ui.set_detail_backdrop(backdrop);
                                 }
                             });
                         }
@@ -1702,14 +1696,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = weak.clone();
+        let player_anim = player_anim.clone();
         ui.on_open_player(move || {
             if let Some(ui) = weak.upgrade() {
                 if ui.get_current_title().is_empty() {
                     ui.set_status_text("还没有正在播放的歌曲".into());
                     return;
                 }
-                ui.set_player_open(true);
+                let request = player_anim.fetch_add(1, Ordering::Relaxed) + 1;
                 ui.set_lyrics_mode(false);
+                ui.set_player_visible(true);
+                let handle = ui.as_weak();
+                let anim = player_anim.clone();
+                Timer::single_shot(Duration::from_millis(16), move || {
+                    if anim.load(Ordering::Relaxed) == request {
+                        if let Some(ui) = handle.upgrade() {
+                            ui.set_player_open(true);
+                        }
+                    }
+                });
                 if ui.get_lyric_follow() {
                     ui.set_lyric_scroll_y(ui.get_lyric_target_y());
                 }
@@ -1719,10 +1724,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = weak.clone();
+        let player_anim = player_anim.clone();
         ui.on_close_player(move || {
             if let Some(ui) = weak.upgrade() {
+                let request = player_anim.fetch_add(1, Ordering::Relaxed) + 1;
                 ui.set_player_open(false);
-                ui.set_lyrics_mode(false);
+                let handle = ui.as_weak();
+                let anim = player_anim.clone();
+                Timer::single_shot(Duration::from_millis(240), move || {
+                    if anim.load(Ordering::Relaxed) == request {
+                        if let Some(ui) = handle.upgrade() {
+                            ui.set_player_visible(false);
+                            ui.set_lyrics_mode(false);
+                        }
+                    }
+                });
             }
         });
     }
