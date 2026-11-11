@@ -1798,7 +1798,6 @@ export component AppWindow inherits Window {
             cross-axis-alignment: center;
 
             dock-cover := Rectangle {
-                visible: !root.cover-flying;
                 width: 62px;
                 height: 62px;
                 border-radius: 16px;
@@ -1811,8 +1810,8 @@ export component AppWindow inherits Window {
                     width: 100%; height: 100%;
                     source: root.current-cover-image;
                     image-fit: cover;
-                    transform-scale-x: dock-cover-tap.has-hover ? 104% : 100%;
-                    transform-scale-y: dock-cover-tap.has-hover ? 104% : 100%;
+                    transform-scale-x: dock-cover-tap.has-hover && !root.cover-flying ? 104% : 100%;
+                    transform-scale-y: dock-cover-tap.has-hover && !root.cover-flying ? 104% : 100%;
                     animate transform-scale-x, transform-scale-y { duration: 180ms; }
                 }
                 if root.current-cover-image.width == 0 : Text {
