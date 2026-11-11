@@ -15,7 +15,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -496,6 +496,36 @@ fn blurred_backdrop(path: &std::path::Path) -> Option<Image> {
 }
 
 static STATUS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static WINDOW_RESTORED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
+fn watch_window_restore() {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic};
+
+    let _ = std::thread::Builder::new()
+        .name("decro-window-watch".into())
+        .spawn(|| {
+            let hwnd = loop {
+                if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::null(), w!("Decro")) } {
+                    break hwnd;
+                }
+                std::thread::sleep(Duration::from_millis(120));
+            };
+            let mut was_minimized = false;
+            loop {
+                let minimized = unsafe { IsIconic(hwnd) }.as_bool();
+                if was_minimized && !minimized {
+                    WINDOW_RESTORED.store(true, Ordering::Relaxed);
+                }
+                was_minimized = minimized;
+                std::thread::sleep(Duration::from_millis(60));
+            }
+        });
+}
+
+#[cfg(not(windows))]
+fn watch_window_restore() {}
 
 fn set_status_temp(ui: &AppWindow, message: String, duration: Duration) {
     ui.set_status_text(message.into());
@@ -1404,8 +1434,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let ui = AppWindow::new()?;
+    watch_window_restore();
     media::start();
     let weak = ui.as_weak();
+    // A couple of full-window repaints after startup also cover the first-map
+    // partial-frame variants of the same software-renderer bug.
+    for delay in [500u64, 1400u64] {
+        let handle = ui.as_weak();
+        Timer::single_shot(Duration::from_millis(delay), move || {
+            if let Some(ui) = handle.upgrade() {
+                ui.set_repaint_nudge(!ui.get_repaint_nudge());
+            }
+        });
+    }
     let catalog = Arc::new(Mutex::new(Catalog::default()));
     let player = Arc::new(Mutex::new(Player::default()));
     let lyrics = Arc::new(Mutex::new(Vec::<netease::LyricLine>::new()));
@@ -1453,6 +1494,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = logger::set_level(&log_level);
     ui.set_log_level(log_level.into());
+    {
+        let weak = weak.clone();
+        let restore_timer = Timer::default();
+        restore_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
+            if !WINDOW_RESTORED.swap(false, Ordering::Relaxed) {
+                return;
+            }
+            if let Some(ui) = weak.upgrade() {
+                // Slint's software renderer can keep a stale partial frame after
+                // restoring a minimized window on Windows. Changing a full-window
+                // overlay forces it to repaint every pixel.
+                ui.set_repaint_nudge(!ui.get_repaint_nudge());
+            }
+        });
+        std::mem::forget(restore_timer);
+    }
+
     ui.set_status_text("正在检查登录状态…".into());
     ui.set_login_open(true);
 

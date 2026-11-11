@@ -740,6 +740,7 @@ export component AppWindow inherits Window {
     in property <[TrackItem]> queue-tracks;
     in property <int> queue-index;
     in-out property <bool> queue-open;
+    in-out property <bool> repaint-nudge;
     private property <length> player-cover-size: 360px;
     private property <length> player-cover-fly-x: 68px + ((root.width - 136px) * 0.4 - root.player-cover-size) / 2;
     private property <length> player-cover-fly-y: root.titlebar-height + 60px + (root.height - root.titlebar-height - 196px - root.player-cover-size) / 2;
@@ -1707,7 +1708,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.3.0 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.3.1 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -1944,6 +1945,14 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    // Forces a full-window repaint after Windows restores a minimized window.
+    Rectangle {
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+        z: 500;
+        background: root.repaint-nudge ? #00000002 : #00000001;
     }
 
     // ── Login modal ──────────────────────────────────────────────────────
