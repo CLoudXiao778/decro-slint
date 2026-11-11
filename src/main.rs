@@ -1144,6 +1144,7 @@ fn play_relative(
         player.index = next;
         let track = player.queue[next].clone();
         player.current = Some(track.clone());
+        player.resume_position = 0.0;
         track
     };
     save_player(player, 0.0);
@@ -2362,6 +2363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.queue = context;
                 player.index = index;
                 player.current = Some(track.clone());
+                player.resume_position = 0.0;
             }
             save_player(&player, 0.0);
             start_track(
@@ -2409,6 +2411,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.queue = context;
                 player.index = index;
                 player.current = Some(track.clone());
+                player.resume_position = 0.0;
             }
             save_player(&player, 0.0);
             start_track(
@@ -2544,6 +2547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.index = index;
                 let track = player.queue[index].clone();
                 player.current = Some(track.clone());
+                player.resume_position = 0.0;
                 track
             };
             save_player(&player, 0.0);
@@ -2771,7 +2775,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let audio = audio.clone();
         let weak = weak.clone();
+        let player = player.clone();
         ui.on_seek(move |value| {
+            let loaded = audio
+                .snapshot
+                .lock()
+                .map(|snapshot| snapshot.loaded)
+                .unwrap_or(false);
+            if !loaded {
+                if let Ok(mut player) = player.lock() {
+                    player.resume_position = value.max(0.0);
+                }
+            }
             let _ = audio.tx.send(AudioCmd::Seek(value));
             if let Some(ui) = weak.upgrade() {
                 ui.set_progress(value);
@@ -3159,13 +3174,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    ui.run()?;
-    let position = audio
-        .snapshot
-        .lock()
-        .map(|snapshot| snapshot.position)
-        .unwrap_or(0.0);
+    let result = ui.run();
+    let position = match audio.snapshot.lock() {
+        Ok(snapshot) if snapshot.loaded => snapshot.position,
+        _ => player
+            .lock()
+            .map(|player| player.resume_position)
+            .unwrap_or(0.0),
+    };
     save_player(&player, position);
+    result?;
     Ok(())
 }
 
