@@ -568,6 +568,18 @@ fn watch_window_restore() {
 #[cfg(not(windows))]
 fn watch_window_restore() {}
 
+fn schedule_forced_exit() {
+    // Safety net for the portable exe: if the event loop or the audio/player
+    // snapshot ever prevents the normal shutdown path, do not leave a hidden
+    // process locking the folder.
+    let _ = std::thread::Builder::new()
+        .name("decro-exit".into())
+        .spawn(|| {
+            std::thread::sleep(Duration::from_millis(2000));
+            std::process::exit(0);
+        });
+}
+
 fn set_status_temp(ui: &AppWindow, message: String, duration: Duration) {
     ui.set_status_text(message.into());
     let request = STATUS_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1478,6 +1490,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     watch_window_restore();
     media::start();
     let weak = ui.as_weak();
+    // `root.close()` only hides the Slint window; without quitting the event
+    // loop the process stays alive with no visible window and keeps the exe
+    // locked. Handle both the custom X button and the system close request.
+    ui.window().on_close_requested(|| {
+        schedule_forced_exit();
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
+    ui.on_quit_app(|| {
+        schedule_forced_exit();
+        let _ = slint::quit_event_loop();
+    });
     // A couple of full-window repaints after startup also cover the first-map
     // partial-frame variants of the same software-renderer bug.
     for delay in [500u64, 1400u64] {
@@ -3348,8 +3372,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(0.0),
     };
     save_player(&player, position);
-    result?;
-    Ok(())
+    if let Err(error) = result {
+        logger::log(
+            "error",
+            "app",
+            &format!("UI event loop ended with error: {error}"),
+        );
+    }
+    // The audio, SMTC and window watcher threads are intentionally detached.
+    // Exit explicitly so they can never keep the portable exe locked.
+    std::process::exit(0);
 }
 
 #[cfg(test)]

@@ -855,6 +855,7 @@ export component AppWindow inherits Window {
     callback close-player();
     callback toggle-queue();
     callback play-queue(int);
+    callback quit-app();
 
     // Page transition is expressed with a soft opacity fade.
     in-out property <float> page-opacity: 1;
@@ -1021,7 +1022,7 @@ export component AppWindow inherits Window {
                     width: 34px;
                     height: 30px;
                     danger: true;
-                    clicked => { root.close(); }
+                    clicked => { root.quit-app(); }
                 }
             }
         }
@@ -1767,7 +1768,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.3.3 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.3.4 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
