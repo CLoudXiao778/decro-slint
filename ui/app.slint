@@ -788,6 +788,7 @@ export component AppWindow inherits Window {
     in-out property <bool> player-visible;
     in-out property <bool> cover-flying;
     in-out property <bool> controls-ready: true;
+    in-out property <bool> window-minimized;
     in property <[TrackItem]> queue-tracks;
     in property <int> queue-index;
     in-out property <bool> queue-open;
@@ -2332,7 +2333,7 @@ export component AppWindow inherits Window {
                 SeekBar {
                     value: root.progress;
                     maximum: root.duration;
-                    playing: root.playing;
+                    playing: root.playing && !root.window-minimized;
                     low-power: root.low-power;
                     seek(value) => { root.seek(value); }
                 }

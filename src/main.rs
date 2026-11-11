@@ -1542,6 +1542,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         restore_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             let ui = weak.upgrade();
             if WINDOW_MINIMIZED.swap(false, Ordering::Relaxed) {
+                if let Some(ui) = &ui {
+                    ui.set_window_minimized(true);
+                }
                 memory::trim_working_set("minimize", "info");
             }
             if WINDOW_BACKGROUNDED.swap(false, Ordering::Relaxed) {
@@ -1551,6 +1554,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if WINDOW_RESTORED.swap(false, Ordering::Relaxed) {
                 if let Some(ui) = &ui {
+                    ui.set_window_minimized(false);
                     // Slint's software renderer can keep a stale partial frame after
                     // restoring a minimized window on Windows. Changing a full-window
                     // overlay forces it to repaint every pixel.
