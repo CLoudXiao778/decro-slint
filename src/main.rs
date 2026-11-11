@@ -182,6 +182,13 @@ fn format_clock(seconds: f32) -> String {
     format!("{:02}:{:02}", total / 60, total % 60)
 }
 
+fn initial_for(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|character| character.to_uppercase().to_string())
+        .unwrap_or_else(|| "D".to_string())
+}
+
 fn track_item(track: &netease::TrackDto, cover: Option<Image>) -> TrackItem {
     TrackItem {
         id: track.id.clone().into(),
@@ -788,6 +795,11 @@ fn load_home(
                 let new_covers = home.new_songs.clone();
                 let recommended = home.recommended.clone();
                 let recommended_count = recommended.len();
+                let daily_first = home.daily.first().cloned();
+                let feature_dto = home.recommended.first().cloned();
+                let daily_first_cover = daily_first.clone();
+                let feature_cover = feature_dto.clone();
+                let daily_count = home.daily.len();
                 update_ui(&ui, move |ui| {
                     ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(
                         track_items_for_ui(&home.recent),
@@ -801,8 +813,80 @@ fn load_home(
                     ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
                         playlist_items_for_ui(&home.recommended),
                     ))));
+
+                    let daily_tint = daily_first
+                        .as_ref()
+                        .map(|track| color_for(&track.id))
+                        .unwrap_or_else(|| Color::from_rgb_u8(201, 32, 39));
+                    ui.set_daily_feature(PlaylistItem {
+                        id: "daily".into(),
+                        title: "每日推荐".into(),
+                        meta: if daily_count > 0 {
+                            format!("每天 6:00 更新 · {daily_count} 首").into()
+                        } else {
+                            "登录后同步每日推荐".into()
+                        },
+                        cover: Image::default(),
+                        tint: daily_tint,
+                    });
+                    if let Some(playlist) = &feature_dto {
+                        ui.set_feature_playlist(PlaylistItem {
+                            id: playlist.id.clone().into(),
+                            title: playlist.name.clone().into(),
+                            meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
+                            cover: Image::default(),
+                            tint: color_for(&playlist.id),
+                        });
+                    }
                     ui.set_status_text(format!("已加载 {recommended_count} 个推荐歌单").into());
                 });
+
+                if let Some(track) = daily_first_cover {
+                    let endpoint = cover_url(&track.cover_url, 500);
+                    if !endpoint.is_empty() {
+                        let cover_state = state.clone();
+                        let cover_ui = ui.clone();
+                        tokio::spawn(async move {
+                            if let Some(path) =
+                                tokio::time::timeout(Duration::from_secs(8), fetch_cover(&cover_state, endpoint))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                            {
+                                update_ui(&cover_ui, move |ui| {
+                                    if let Ok(image) = Image::load_from_path(&path) {
+                                        let mut item = ui.get_daily_feature();
+                                        item.cover = image;
+                                        ui.set_daily_feature(item);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }
+                if let Some(playlist) = feature_cover {
+                    let endpoint = cover_url(&playlist.cover_url, 500);
+                    if !endpoint.is_empty() {
+                        let cover_state = state.clone();
+                        let cover_ui = ui.clone();
+                        tokio::spawn(async move {
+                            if let Some(path) =
+                                tokio::time::timeout(Duration::from_secs(8), fetch_cover(&cover_state, endpoint))
+                                    .await
+                                    .ok()
+                                    .flatten()
+                            {
+                                update_ui(&cover_ui, move |ui| {
+                                    if let Ok(image) = Image::load_from_path(&path) {
+                                        let mut item = ui.get_feature_playlist();
+                                        item.cover = image;
+                                        ui.set_feature_playlist(item);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }
                 for (target, tracks, limit) in [
                     (TrackTarget::Recent, recent_covers, 80usize),
                     (TrackTarget::Daily, daily_covers, 80),
@@ -915,6 +999,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_quality(snapshot.quality.clone().into());
     let _ = audio.tx.send(AudioCmd::Volume(snapshot.volume));
     ui.set_data_dir(paths::data_dir().display().to_string().into());
+    ui.set_daily_feature(PlaylistItem {
+        id: "daily".into(),
+        title: "每日推荐".into(),
+        meta: "登录后同步每日推荐".into(),
+        cover: Image::default(),
+        tint: Color::from_rgb_u8(201, 32, 39),
+    });
+    ui.set_feature_playlist(PlaylistItem {
+        id: "".into(),
+        title: "发现音乐".into(),
+        meta: "登录后获取推荐歌单".into(),
+        cover: Image::default(),
+        tint: Color::from_rgb_u8(60, 40, 80),
+    });
     let log_level = fs::read_to_string(paths::data_dir().join("log-level"))
         .unwrap_or_default()
         .trim()
@@ -1019,8 +1117,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         update_ui(&weak, move |ui| {
                                             ui.set_logged_in(true);
                                             ui.set_login_open(false);
+                                            let initial = initial_for(&account.nickname);
                                             ui.set_account_name(account.nickname.into());
                                             ui.set_account_id(account.user_id.into());
+                                            ui.set_account_initial(initial.into());
                                             ui.set_status_text("登录成功，正在同步音乐库…".into());
                                         });
                                         load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
@@ -1063,8 +1163,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         update_ui(&weak, move |ui| {
                             ui.set_logged_in(true);
                             ui.set_login_open(false);
+                            let initial = initial_for(&account.nickname);
                             ui.set_account_name(account.nickname.into());
                             ui.set_account_id(account.user_id.into());
+                            ui.set_account_initial(initial.into());
                             ui.set_status_text("Cookie 导入成功".into());
                         });
                         load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
@@ -1100,6 +1202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_login_open(true);
                     ui.set_account_name("".into());
                     ui.set_account_id("".into());
+                    ui.set_account_initial("D".into());
                     ui.set_status_text("已退出登录".into());
                     ui.invoke_refresh_qr();
                 });
@@ -1207,15 +1310,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let meta = format!("{} · {} 首", playlist.creator, playlist.track_count);
                         let description = playlist.description.clone();
                         let cover_tint = color_for(&playlist.id);
-                        let cover_endpoint = cover_url(&playlist.cover_url, 200);
+                        let cover_endpoint = cover_url(&playlist.cover_url, 500);
+                        let backdrop_endpoint = cover_url(&playlist.cover_url, 24);
+                        let first_id = playlist
+                            .tracks
+                            .first()
+                            .map(|track| track.id.clone())
+                            .unwrap_or_default();
                         let detail_playlist = playlist.clone();
                         update_ui(&weak, move |ui| {
                             ui.set_page("detail".into());
                             ui.set_detail_title(title.into());
                             ui.set_detail_meta(meta.into());
                             ui.set_detail_description(description.into());
+                            ui.set_detail_first_id(first_id.into());
                             ui.set_detail_cover_tint(cover_tint);
                             ui.set_detail_cover_image(Image::default());
+                            ui.set_detail_backdrop(Image::default());
                             ui.set_detail_tracks(ModelRc::from(Rc::new(VecModel::from(
                                 track_items_for_ui(&detail_playlist.tracks),
                             ))));
@@ -1227,16 +1338,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             track_covers,
                             600,
                         ));
-                        if !cover_endpoint.is_empty() {
+                        if !cover_endpoint.is_empty() || !backdrop_endpoint.is_empty() {
                             let cover_state = state.clone();
                             let cover_ui = weak.clone();
                             let cover_title = playlist.name.clone();
                             tokio::spawn(async move {
-                                if let Some(path) = fetch_cover(&cover_state, cover_endpoint).await {
+                                let (cover_path, backdrop_path) = tokio::join!(
+                                    tokio::time::timeout(
+                                        Duration::from_secs(8),
+                                        fetch_cover(&cover_state, cover_endpoint)
+                                    ),
+                                    tokio::time::timeout(
+                                        Duration::from_secs(8),
+                                        fetch_cover(&cover_state, backdrop_endpoint)
+                                    ),
+                                );
+                                let cover_path = cover_path.ok().flatten();
+                                let backdrop_path = backdrop_path.ok().flatten();
+                                if cover_path.is_some() || backdrop_path.is_some() {
                                     update_ui(&cover_ui, move |ui| {
                                         if ui.get_detail_title().as_str() == cover_title {
-                                            if let Ok(image) = Image::load_from_path(&path) {
-                                                ui.set_detail_cover_image(image);
+                                            if let Some(path) = cover_path {
+                                                if let Ok(image) = Image::load_from_path(&path) {
+                                                    ui.set_detail_cover_image(image);
+                                                }
+                                            }
+                                            if let Some(path) = backdrop_path {
+                                                if let Ok(image) = Image::load_from_path(&path) {
+                                                    ui.set_detail_backdrop(image);
+                                                }
                                             }
                                         }
                                     });
@@ -1247,6 +1377,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
                 }
             });
+        });
+    }
+
+    {
+        let runtime = runtime.clone();
+        let state = state.clone();
+        let weak = weak.clone();
+        let catalog = catalog.clone();
+        ui.on_open_daily(move || {
+            let daily = catalog
+                .lock()
+                .ok()
+                .map(|catalog| catalog.daily.clone())
+                .unwrap_or_default();
+            if daily.is_empty() {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text("请先登录同步每日推荐".into());
+                    if !ui.get_logged_in() {
+                        ui.set_login_open(true);
+                        ui.invoke_refresh_qr();
+                    }
+                }
+                return;
+            }
+            if let Ok(mut catalog) = catalog.lock() {
+                catalog.detail = daily.clone();
+            }
+            let tracks = daily.clone();
+            let first = daily.first().cloned();
+            let first_id = first
+                .as_ref()
+                .map(|track| track.id.clone())
+                .unwrap_or_default();
+            let tint = first
+                .as_ref()
+                .map(|track| color_for(&track.id))
+                .unwrap_or_else(|| Color::from_rgb_u8(201, 32, 39));
+            let count = daily.len();
+            let detail_tracks = daily.clone();
+            update_ui(&weak, move |ui| {
+                ui.set_page("detail".into());
+                ui.set_detail_title("每日推荐".into());
+                ui.set_detail_meta(format!("每天 6:00 更新 · {count} 首").into());
+                ui.set_detail_description("根据你的音乐口味每日更新".into());
+                ui.set_detail_first_id(first_id.into());
+                ui.set_detail_cover_tint(tint);
+                ui.set_detail_cover_image(Image::default());
+                ui.set_detail_backdrop(Image::default());
+                ui.set_detail_tracks(ModelRc::from(Rc::new(VecModel::from(
+                    track_items_for_ui(&detail_tracks),
+                ))));
+            });
+            runtime.spawn(load_track_covers(
+                state.clone(),
+                weak.clone(),
+                TrackTarget::Detail,
+                tracks,
+                600,
+            ));
+            if let Some(track) = first {
+                let cover_endpoint = cover_url(&track.cover_url, 500);
+                let backdrop_endpoint = cover_url(&track.cover_url, 24);
+                if !cover_endpoint.is_empty() || !backdrop_endpoint.is_empty() {
+                    let cover_state = state.clone();
+                    let cover_ui = weak.clone();
+                    runtime.spawn(async move {
+                        let (cover_path, backdrop_path) = tokio::join!(
+                            tokio::time::timeout(
+                                Duration::from_secs(8),
+                                fetch_cover(&cover_state, cover_endpoint)
+                            ),
+                            tokio::time::timeout(
+                                Duration::from_secs(8),
+                                fetch_cover(&cover_state, backdrop_endpoint)
+                            ),
+                        );
+                        let cover_path = cover_path.ok().flatten();
+                        let backdrop_path = backdrop_path.ok().flatten();
+                        if cover_path.is_some() || backdrop_path.is_some() {
+                            update_ui(&cover_ui, move |ui| {
+                                if ui.get_page().as_str() != "detail"
+                                    || ui.get_detail_title().as_str() != "每日推荐"
+                                {
+                                    return;
+                                }
+                                if let Some(path) = cover_path {
+                                    if let Ok(image) = Image::load_from_path(&path) {
+                                        ui.set_detail_cover_image(image);
+                                    }
+                                }
+                                if let Some(path) = backdrop_path {
+                                    if let Ok(image) = Image::load_from_path(&path) {
+                                        ui.set_detail_backdrop(image);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+            }
         });
     }
 
@@ -1349,8 +1579,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let audio = audio.clone();
+        let weak = weak.clone();
         ui.on_seek(move |value| {
             let _ = audio.tx.send(AudioCmd::Seek(value));
+            if let Some(ui) = weak.upgrade() {
+                ui.set_progress(value);
+                ui.set_position_text(format_clock(value).into());
+            }
         });
     }
 
@@ -1474,6 +1709,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 ui.set_player_open(true);
+                ui.set_lyrics_mode(false);
                 if ui.get_lyric_follow() {
                     ui.set_lyric_scroll_y(ui.get_lyric_target_y());
                 }
@@ -1486,6 +1722,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_close_player(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_player_open(false);
+                ui.set_lyrics_mode(false);
             }
         });
     }
@@ -1553,8 +1790,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     update_ui(&weak, move |ui| {
                         ui.set_logged_in(true);
                         ui.set_login_open(false);
+                        let initial = initial_for(&account.nickname);
                         ui.set_account_name(account.nickname.into());
                         ui.set_account_id(account.user_id.into());
+                        ui.set_account_initial(initial.into());
                     });
                     load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
                     load_library(&task_runtime, state.clone(), weak.clone(), catalog);

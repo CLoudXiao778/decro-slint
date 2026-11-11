@@ -1,4 +1,4 @@
-import { Button, LineEdit, ListView, ScrollView, Slider } from "std-widgets.slint";
+import { ListView, ScrollView, Palette } from "std-widgets.slint";
 
 export struct TrackItem {
     id: string,
@@ -24,216 +24,652 @@ export struct LyricItem {
     text: string,
 }
 
-component NavButton inherits Rectangle {
-    in property <string> label;
+// ── Small building blocks ────────────────────────────────────────────────
+
+component Glyph inherits Image {
+    in property <length> glyph-size: 18px;
+    in property <color> tint: #8e8e93;
+    width: root.glyph-size;
+    height: root.glyph-size;
+    colorize: root.tint;
+    image-fit: contain;
+}
+
+component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> icon-size: 17px;
+    in property <color> tint: #8e8e93;
+    in property <color> hover-tint: #f5f5f7;
+    in property <color> hover-background: #ffffff0d;
+    in property <bool> danger;
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: tap.has-hover ? (root.danger ? #d13438 : root.hover-background) : transparent;
+    animate background { duration: 120ms; }
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        glyph-size: root.icon-size;
+        tint: tap.has-hover ? (root.danger ? #ffffff : root.hover-tint) : root.tint;
+    }
+    tap := TouchArea { clicked => { root.clicked(); } }
+}
+
+component NavIcon inherits Rectangle {
+    in property <image> icon;
     in property <bool> active;
     callback clicked();
-    height: 38px;
-    width: 86px;
+    width: 44px;
+    height: 44px;
     border-radius: 12px;
-    background: active ? #c92027 : (tap.has-hover ? #ffffff0d : transparent);
-    animate background { duration: 160ms; }
-    Text {
-        text: root.label;
-        color: root.active ? #fff : (tap.has-hover ? #d4d4d9 : #9a9a9f);
-        font-size: 14px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        animate color { duration: 160ms; }
+    background: root.active ? #c920271f : (tap.has-hover ? #ffffff0a : transparent);
+    animate background { duration: 140ms; }
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        glyph-size: 20px;
+        tint: root.active ? #ff645d : (tap.has-hover ? #f5f5f7 : #8e8e93);
     }
     tap := TouchArea { clicked => { root.clicked(); } }
 }
 
-component Chip inherits Rectangle {
+component PillButton inherits Rectangle {
     in property <string> label;
-    in property <bool> active;
-    callback clicked();
-    width: 86px;
-    height: 34px;
-    border-radius: 17px;
-    background: root.active ? #c92027 : #1b1b1e;
-    border-width: 1px;
-    border-color: root.active ? #c92027 : #2c2c30;
-    Text { text: root.label; color: root.active ? #ffffff : #b7b7bd; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-    TouchArea { clicked => { root.clicked(); } }
-}
-
-component DockIconButton inherits Rectangle {
-    in property <string> glyph;
     in property <bool> primary;
-    callback clicked();
-    width: root.primary ? 42px : 34px;
-    height: root.primary ? 42px : 34px;
-    border-radius: self.width / 2;
-    background: root.primary ? (tap.has-hover ? #ffffff : #ececef) : (tap.has-hover ? #ffffff1a : #ffffff0a);
-    border-width: root.primary ? 0px : 1px;
-    border-color: #ffffff14;
-    animate background { duration: 150ms; }
-    Text {
-        text: root.glyph;
-        color: root.primary ? #17171a : #e6e6ea;
-        font-size: root.primary ? 16px : 14px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        animate color { duration: 150ms; }
-    }
-    tap := TouchArea { clicked => { root.clicked(); } }
-}
-
-component DockPill inherits Rectangle {
-    in property <string> label;
+    in property <bool> disabled;
     callback clicked();
     height: 32px;
-    width: 52px;
+    width: 96px;
     border-radius: 16px;
-    background: tap.has-hover ? #ffffff1c : #ffffff0a;
-    border-width: 1px;
-    border-color: #ffffff16;
-    animate background { duration: 150ms; }
-    Text { text: root.label; color: #dedee3; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+    background: root.primary ? (tap.has-hover ? #ff7d76 : #ff645d) : (tap.has-hover ? #ffffff16 : #ffffff0a);
+    border-width: root.primary ? 0px : 1px;
+    border-color: #ffffff14;
+    opacity: root.disabled ? 0.4 : 1;
+    animate background { duration: 140ms; }
+    label-text := Text {
+        text: root.label;
+        color: root.primary ? #1b0b0e : #dedee3;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+    }
+    tap := TouchArea {
+        clicked => {
+            if !root.disabled {
+                root.clicked();
+            }
+        }
+    }
+}
+
+component RoundIconButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> icon-size: 20px;
+    in property <length> button-size: 62px;
+    in property <color> background-color: #ffffff21;
+    callback clicked();
+    width: root.button-size;
+    height: root.button-size;
+    border-radius: self.width / 2;
+    background: tap.has-hover ? #ffffff30 : root.background-color;
+    animate background { duration: 140ms; }
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        glyph-size: root.icon-size;
+        tint: #ffffff;
+    }
     tap := TouchArea { clicked => { root.clicked(); } }
 }
 
-component TrackRow inherits Rectangle {
-    in property <TrackItem> item;
-    in property <bool> current;
+// ── Content components ───────────────────────────────────────────────────
+
+component FeatureCard inherits Rectangle {
+    in property <PlaylistItem> item;
+    in property <string> eyebrow;
     callback clicked();
-    height: 64px;
-    border-radius: 12px;
+    border-radius: 26px;
     clip: true;
-    background: current ? #2a1719 : (tap.has-hover ? #202024 : #171719);
-    animate background { duration: 160ms; }
-    HorizontalLayout {
-        padding: 8px;
-        spacing: 12px;
+    background: root.item.tint;
+    Image {
+        width: 100%;
+        height: 100%;
+        source: root.item.cover;
+        image-fit: cover;
+        transform-scale-x: tap.has-hover ? 103% : 100%;
+        transform-scale-y: tap.has-hover ? 103% : 100%;
+        animate transform-scale-x, transform-scale-y { duration: 420ms; easing: ease-out; }
+    }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: @linear-gradient(180deg, #00000000 20%, #0000001a 50%, #000000d9 100%);
+    }
+    VerticalLayout {
+        alignment: end;
+        padding: 28px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 7px;
+            alignment: center;
+            Glyph {
+                source: @image-url("../assets/icons/sparkles.svg");
+                glyph-size: 13px;
+                tint: #ffffffb3;
+            }
+            Text {
+                text: root.eyebrow;
+                color: #ffffffb3;
+                font-size: 10px;
+                font-weight: 650;
+                letter-spacing: 1px;
+            }
+        }
+        Text {
+            text: root.item.title;
+            color: #ffffff;
+            font-size: 34px;
+            font-weight: 700;
+            overflow: elide;
+        }
+        Text {
+            text: root.item.meta;
+            color: #ffffffab;
+            font-size: 12px;
+            overflow: elide;
+        }
+    }
+    tap := TouchArea { clicked => { root.clicked(); } }
+}
+
+component ShelfCard inherits Rectangle {
+    in property <PlaylistItem> item;
+    callback clicked();
+    width: 176px;
+    height: 222px;
+    background: transparent;
+    VerticalLayout {
+        spacing: 8px;
         Rectangle {
-            width: 48px;
-            height: 48px;
-            border-radius: 8px;
+            width: 176px;
+            height: 176px;
+            border-radius: 18px;
             background: root.item.tint;
             clip: true;
             Image {
-                width: 100%; height: 100%;
+                width: 100%;
+                height: 100%;
                 source: root.item.cover;
                 image-fit: cover;
-                transform-scale-x: tap.has-hover ? 105% : 100%;
-                transform-scale-y: tap.has-hover ? 105% : 100%;
-                animate transform-scale-x, transform-scale-y { duration: 180ms; }
+                transform-scale-x: tap.has-hover ? 104% : 100%;
+                transform-scale-y: tap.has-hover ? 104% : 100%;
+                animate transform-scale-x, transform-scale-y { duration: 360ms; easing: ease-out; }
+            }
+            if root.item.cover.width == 0 : Text {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text: "♫";
+                color: #ffffff77;
+                font-size: 42px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.item.title;
+            color: #f5f5f7;
+            font-size: 13px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.item.meta;
+            color: #8e8e93;
+            font-size: 10px;
+            overflow: elide;
+        }
+    }
+    tap := TouchArea { clicked => { root.clicked(); } }
+}
+
+component TrackShelfCard inherits Rectangle {
+    in property <TrackItem> item;
+    callback clicked();
+    width: 176px;
+    height: 222px;
+    background: transparent;
+    VerticalLayout {
+        spacing: 8px;
+        Rectangle {
+            width: 176px;
+            height: 176px;
+            border-radius: 18px;
+            background: root.item.tint;
+            clip: true;
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.item.cover;
+                image-fit: cover;
+                transform-scale-x: tap.has-hover ? 104% : 100%;
+                transform-scale-y: tap.has-hover ? 104% : 100%;
+                animate transform-scale-x, transform-scale-y { duration: 360ms; easing: ease-out; }
             }
             if root.item.cover.width == 0 : Text {
                 x: 0; y: 0; width: 100%; height: 100%;
                 text: "♪";
-                color: #ffffff88;
-                font-size: 18px;
+                color: #ffffff77;
+                font-size: 42px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.item.title;
+            color: #f5f5f7;
+            font-size: 13px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.item.artist;
+            color: #8e8e93;
+            font-size: 10px;
+            overflow: elide;
+        }
+    }
+    tap := TouchArea { clicked => { root.clicked(); } }
+}
+
+component MediaRow inherits Rectangle {
+    in property <TrackItem> item;
+    in property <bool> current;
+    callback clicked();
+    height: 72px;
+    border-radius: 16px;
+    clip: true;
+    background: root.current ? #2a1719 : (tap.has-hover ? #232326 : #17171a);
+    animate background { duration: 150ms; }
+    HorizontalLayout {
+        padding: 10px;
+        spacing: 14px;
+        Rectangle {
+            width: 52px;
+            height: 52px;
+            border-radius: 12px;
+            background: root.item.tint;
+            clip: true;
+            Image { width: 100%; height: 100%; source: root.item.cover; image-fit: cover; }
+            if root.item.cover.width == 0 : Text {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text: "♪";
+                color: #ffffff77;
+                font-size: 20px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
         }
         VerticalLayout {
             horizontal-stretch: 1;
-            spacing: 3px;
+            spacing: 4px;
             alignment: center;
-            Text { text: root.item.title; color: #f1f1f2; font-size: 14px; overflow: elide; }
-            Text { text: root.item.artist + " · " + root.item.meta; color: #85858a; font-size: 11px; overflow: elide; }
+            Text { text: root.item.title; color: #f5f5f7; font-size: 15px; font-weight: 600; overflow: elide; }
+            Text { text: root.item.artist + " · " + root.item.meta; color: #8e8e93; font-size: 12px; overflow: elide; }
         }
-        Text { text: root.item.duration; color: #77777c; font-size: 11px; vertical-alignment: center; }
+        if root.current : Rectangle {
+            width: 7px; height: 7px; border-radius: 4px; background: #ff645d;
+        }
+        Text { text: root.item.duration; color: #77777d; font-size: 11px; vertical-alignment: center; }
     }
     tap := TouchArea { clicked => { root.clicked(); } }
 }
 
-component PlaylistCard inherits Rectangle {
+component PlaylistRow inherits Rectangle {
     in property <PlaylistItem> item;
     callback clicked();
-    height: 54px;
-    border-radius: 12px;
+    height: 72px;
+    border-radius: 16px;
     clip: true;
-    background: tap.has-hover ? #202024 : #171719;
-    animate background { duration: 160ms; }
+    background: tap.has-hover ? #232326 : #17171a;
+    animate background { duration: 150ms; }
     HorizontalLayout {
-        padding: 7px;
-        spacing: 10px;
+        padding: 10px;
+        spacing: 14px;
         Rectangle {
-            width: 40px; height: 40px; border-radius: 8px; background: root.item.tint;
+            width: 52px;
+            height: 52px;
+            border-radius: 12px;
+            background: root.item.tint;
             clip: true;
-            Image {
-                width: 100%; height: 100%;
-                source: root.item.cover;
-                image-fit: cover;
-                transform-scale-x: tap.has-hover ? 106% : 100%;
-                transform-scale-y: tap.has-hover ? 106% : 100%;
-                animate transform-scale-x, transform-scale-y { duration: 180ms; }
-            }
+            Image { width: 100%; height: 100%; source: root.item.cover; image-fit: cover; }
             if root.item.cover.width == 0 : Text {
                 x: 0; y: 0; width: 100%; height: 100%;
-                text: "♫"; color: #ffffff88; font-size: 16px; horizontal-alignment: center; vertical-alignment: center;
+                text: "♫";
+                color: #ffffff77;
+                font-size: 20px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
         VerticalLayout {
             horizontal-stretch: 1;
-            spacing: 2px; alignment: center;
-            Text { text: root.item.title; color: #f1f1f2; font-size: 13px; overflow: elide; }
-            Text { text: root.item.meta; color: #85858a; font-size: 10px; overflow: elide; }
+            spacing: 4px;
+            alignment: center;
+            Text { text: root.item.title; color: #f5f5f7; font-size: 15px; font-weight: 600; overflow: elide; }
+            Text { text: root.item.meta; color: #8e8e93; font-size: 12px; overflow: elide; }
         }
+        Glyph { source: @image-url("../assets/icons/chevron-right.svg"); glyph-size: 15px; tint: #5f5f66; }
     }
     tap := TouchArea { clicked => { root.clicked(); } }
 }
 
+component DetailRow inherits Rectangle {
+    in property <TrackItem> item;
+    in property <bool> current;
+    callback clicked();
+    height: 76px;
+    border-radius: 16px;
+    clip: true;
+    background: root.current ? #c9202726 : (tap.has-hover ? #ffffff12 : #ffffff08);
+    border-width: 1px;
+    border-color: root.current ? #c9202755 : transparent;
+    animate background { duration: 150ms; }
+    HorizontalLayout {
+        padding: 10px;
+        spacing: 14px;
+        Rectangle {
+            width: 54px;
+            height: 54px;
+            border-radius: 13px;
+            background: root.item.tint;
+            clip: true;
+            Image { width: 100%; height: 100%; source: root.item.cover; image-fit: cover; }
+            if root.item.cover.width == 0 : Text {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text: "♪";
+                color: #ffffff77;
+                font-size: 20px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 4px;
+            alignment: center;
+            Text { text: root.item.title; color: #f5f5f7; font-size: 15px; font-weight: 600; overflow: elide; }
+            Text { text: root.item.artist; color: #8e8e93; font-size: 12px; overflow: elide; }
+        }
+        if root.current : Rectangle {
+            width: 8px; height: 8px; border-radius: 4px; background: #ff645d;
+        }
+        Text { text: root.item.duration; color: #8e8e93; font-size: 11px; vertical-alignment: center; }
+    }
+    tap := TouchArea { clicked => { root.clicked(); } }
+}
+
+component SearchField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder: "搜索歌曲、歌手、歌单";
+    callback accepted();
+    height: 64px;
+    border-radius: 32px;
+    background: #1b1c1e;
+    border-width: 1px;
+    border-color: #ffffff12;
+    HorizontalLayout {
+        padding-left: 22px;
+        padding-right: 14px;
+        spacing: 12px;
+        alignment: center;
+        Glyph { source: @image-url("../assets/icons/search.svg"); glyph-size: 20px; tint: #8e8e93; }
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 34px;
+            background: transparent;
+            if root.text.is-empty : Text {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text: root.placeholder;
+                color: #77777d;
+                font-size: 16px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            input := TextInput {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text <=> root.text;
+                color: #f5f5f7;
+                font-size: 16px;
+                vertical-alignment: center;
+                accepted => { root.accepted(); }
+            }
+        }
+        if !root.text.is-empty : IconButton {
+            icon: @image-url("../assets/icons/close.svg");
+            icon-size: 14px;
+            width: 28px;
+            height: 28px;
+            clicked => { root.text = ""; }
+        }
+    }
+}
+
+component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    callback accepted();
+    height: 40px;
+    border-radius: 10px;
+    background: #101012;
+    border-width: 1px;
+    border-color: #ffffff12;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Rectangle {
+            horizontal-stretch: 1;
+            background: transparent;
+            if root.text.is-empty : Text {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text: root.placeholder;
+                color: #77777d;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            input := TextInput {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text <=> root.text;
+                color: #f5f5f7;
+                font-size: 12px;
+                vertical-alignment: center;
+                accepted => { root.accepted(); }
+            }
+        }
+    }
+}
+
+component SeekBar inherits Rectangle {
+    in property <float> value;
+    in property <float> maximum;
+    callback seek(float);
+    height: 26px;
+    property <length> fill-width: root.maximum > 0
+        ? min(root.width, root.width * max(0, min(1, root.value / root.maximum)))
+        : 0px;
+    Rectangle {
+        x: 0;
+        y: (parent.height - 3px) / 2;
+        width: 100%;
+        height: 3px;
+        border-radius: 2px;
+        background: #ffffff3d;
+    }
+    Rectangle {
+        x: 0;
+        y: (parent.height - 3px) / 2;
+        width: root.fill-width;
+        height: 3px;
+        border-radius: 2px;
+        background: #ffffff;
+    }
+    Rectangle {
+        x: root.fill-width - 2px;
+        y: (parent.height - 18px) / 2;
+        width: 4px;
+        height: 18px;
+        border-radius: 2px;
+        background: #ffffff;
+        visible: root.maximum > 0;
+    }
+    tap := TouchArea {
+        clicked => {
+            root.seek(root.maximum * max(0, min(1, tap.mouse-x / self.width)));
+        }
+        moved => {
+            if (tap.pressed) {
+                root.seek(root.maximum * max(0, min(1, tap.mouse-x / self.width)));
+            }
+        }
+    }
+}
+
+component VolumeBar inherits Rectangle {
+    in-out property <float> value;
+    callback changed(float);
+    callback released();
+    height: 22px;
+    width: 110px;
+    property <length> fill-width: root.width * max(0, min(1, root.value));
+    Rectangle {
+        x: 0;
+        y: (parent.height - 2px) / 2;
+        width: 100%;
+        height: 2px;
+        border-radius: 1px;
+        background: #ffffff38;
+    }
+    Rectangle {
+        x: 0;
+        y: (parent.height - 2px) / 2;
+        width: root.fill-width;
+        height: 2px;
+        border-radius: 1px;
+        background: #ffffffb8;
+    }
+    tap := TouchArea {
+        clicked => {
+            root.value = max(0, min(1, tap.mouse-x / self.width));
+            root.changed(root.value);
+        }
+        moved => {
+            if (tap.pressed) {
+                root.value = max(0, min(1, tap.mouse-x / self.width));
+                root.changed(root.value);
+            }
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up) {
+                root.released();
+            }
+        }
+    }
+}
+
+// ── Window ───────────────────────────────────────────────────────────────
+
 export component AppWindow inherits Window {
+    no-frame: true;
+    resize-border-width: 6px;
+    title: "Decro";
+    icon: @image-url("../assets/icon.png");
+    width: 1200px;
+    height: 760px;
+    background: #000000;
+    default-font-family: "Segoe UI";
+    init => { Palette.color-scheme = ColorScheme.dark; }
+
+    private property <length> titlebar-height: 48px;
+    private property <length> dock-height: 82px;
+    private property <length> sidebar-width: 76px;
+    private property <length> lyric-line-height: 64px;
+    private property <length> lyric-view-height: 430px;
+
+    // Account / session
     in property <bool> logged-in;
     in property <string> account-name: "";
     in property <string> account-id: "";
+    in property <string> account-initial: "D";
+    in-out property <bool> login-open;
+    in property <image> qr-image;
+    in-out property <string> cookie-text: "";
+
+    // Pages
+    in property <string> page: "home";
+    in property <string> status-text: "";
     in property <string> data-dir: "";
     in property <string> quality: "exhigh";
     in property <string> log-level: "info";
-    in property <string> page: "home";
-    in property <string> status-text: "";
-    in-out property <string> cookie-text: "";
-    in-out property <bool> login-open;
-    in property <image> qr-image;
+
+    // Models
     in property <[PlaylistItem]> playlists;
+    in property <PlaylistItem> daily-feature;
+    in property <PlaylistItem> feature-playlist;
     in property <[TrackItem]> recent-tracks;
+    in property <[TrackItem]> daily-tracks;
+    in property <[TrackItem]> new-tracks;
     in property <[PlaylistItem]> library-playlists;
     in property <[TrackItem]> library-tracks;
-    in property <[TrackItem]> new-tracks;
-    in property <[TrackItem]> daily-tracks;
     in property <[TrackItem]> detail-tracks;
-    in property <[TrackItem]> search-tracks;
-    in property <[PlaylistItem]> search-playlists;
     in property <string> detail-title: "";
     in property <string> detail-meta: "";
     in property <string> detail-description: "";
-    in property <color> detail-cover-tint: #171719;
+    in property <string> detail-first-id: "";
+    in property <color> detail-cover-tint: #17171a;
     in property <image> detail-cover-image;
+    in property <image> detail-backdrop;
+    in property <[TrackItem]> search-tracks;
+    in property <[PlaylistItem]> search-playlists;
     in-out property <string> search-text: "";
+
+    // Player
     in property <string> current-id: "";
     in property <string> current-title: "";
     in property <string> current-artist: "";
     in property <string> current-album: "";
     in property <string> current-quality: "";
-    in property <string> position-text: "00:00";
-    in property <string> duration-text: "00:00";
     in property <color> current-cover: #c92027;
     in property <image> current-cover-image;
     in property <image> current-backdrop;
+    in property <string> position-text: "00:00";
+    in property <string> duration-text: "00:00";
     in property <bool> playing;
     in property <bool> loading;
     in-out property <float> progress;
     in property <float> duration;
-    in-out property <float> volume: 0.7;
-    in property <bool> player-open;
+    in-out property <float> volume: 0.64;
+    in-out property <bool> player-open;
+    in-out property <bool> lyrics-mode;
     in property <[LyricItem]> lyrics;
     in property <int> lyric-index;
     in-out property <bool> lyric-follow: true;
     in-out property <length> lyric-scroll-y;
-    private property <length> lyric-view-height: 560px;
-    private property <length> lyric-line-height: 42px;
+    out property <length> lyric-target-y: root.lyric-y-for(root.lyric-index);
+
     pure function lyric-y-for(index: int) -> length {
         return max(0px, min(
             index * root.lyric-line-height - (root.lyric-view-height - root.lyric-line-height) / 2,
             root.lyrics.length * root.lyric-line-height - root.lyric-view-height
         ));
     }
-    out property <length> lyric-target-y: root.lyric-y-for(root.lyric-index);
 
     callback refresh-qr();
     callback import-cookie(string);
@@ -242,6 +678,7 @@ export component AppWindow inherits Window {
     callback nav(string);
     callback search(string);
     callback open-playlist(string);
+    callback open-daily();
     callback play-track(string);
     callback play-detail(string);
     callback toggle-play();
@@ -257,674 +694,1255 @@ export component AppWindow inherits Window {
     callback open-player();
     callback close-player();
 
-    title: "Decro Slint";
-    icon: @image-url("../assets/icon.png");
-    width: 1180px;
-    height: 780px;
-    background: @linear-gradient(160deg, #0d0d10 0%, #070709 58%, #0c0a0b 100%);
+    // Page transition is expressed with a soft opacity fade.
+    property <float> page-opacity: 1;
 
+    // Ambient wash behind the app shell.
     Rectangle {
-        x: -180px; y: -220px;
-        width: 720px; height: 720px;
-        background: @radial-gradient(circle, #c9202714 0%, #c9202700 70%);
+        x: -220px;
+        y: -260px;
+        width: 920px;
+        height: 920px;
+        background: @radial-gradient(circle, #c9202716 0%, #c9202700 64%);
     }
     Rectangle {
-        x: root.width - 540px;
-        y: root.height - 640px;
-        width: 720px; height: 720px;
-        background: @radial-gradient(circle, #e3b56d0d 0%, #e3b56d00 70%);
-    }
-
-    if root.login-open && !root.logged-in : Rectangle {
-        x: 0; y: 0; width: 100%; height: 100%;
-        z: 100;
-        background: #000000cc;
-        TouchArea { }
-        Rectangle {
-            width: 390px; height: 600px;
-            x: (root.width - self.width) / 2;
-            y: (root.height - self.height) / 2;
-            border-radius: 24px;
-            background: #171719;
-            border-width: 1px;
-            border-color: #2d2d31;
-            VerticalLayout {
-                padding: 24px;
-                spacing: 12px;
-                Text { text: "登录网易云音乐"; color: #fff; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
-                Text { text: "打开网易云 App 扫码"; color: #8d8d93; font-size: 12px; horizontal-alignment: center; }
-                Rectangle {
-                    height: 260px;
-                    border-radius: 14px;
-                    background: #f5f5f5;
-                    Image { width: 100%; height: 100%; source: root.qr-image; image-fit: contain; }
-                }
-                Text { text: root.status-text; color: #b9b9be; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Button { text: "刷新二维码"; clicked => { root.refresh-qr(); } }
-                    Button { text: "关闭"; clicked => { root.close-login(); } }
-                }
-                LineEdit {
-                    text <=> root.cookie-text;
-                    placeholder-text: "或粘贴网页版 MUSIC_U Cookie";
-                    height: 38px;
-                }
-                Button {
-                    text: "导入 Cookie";
-                    clicked => { root.import-cookie(root.cookie-text); }
-                }
-            }
-        }
+        x: root.width - 760px;
+        y: root.height - 760px;
+        width: 900px;
+        height: 900px;
+        background: @radial-gradient(circle, #6b3fa012 0%, #6b3fa000 64%);
     }
 
     VerticalLayout {
         spacing: 0px;
 
+        // ── Custom titlebar ─────────────────────────────────────────────
         Rectangle {
-            height: 54px;
-            background: #111113e6;
+            height: root.titlebar-height;
+            background: #09090b;
             border-width: 1px;
-            border-color: #ffffff12;
-            drop-shadow-color: #00000066;
-            drop-shadow-blur: 18px;
-            drop-shadow-offset-y: 4px;
+            border-color: #ffffff0f;
+            z: 20;
+            WindowMoveArea { }
+
             HorizontalLayout {
                 padding-left: 18px;
-                padding-right: 18px;
-                spacing: 8px;
-                Text { text: "DECRO"; color: #f1f1f2; font-size: 18px; font-weight: 800; vertical-alignment: center; }
-                Text { text: "DESKTOP"; color: #77777d; font-size: 9px; vertical-alignment: center; }
-                Rectangle { width: 22px; }
-                NavButton { label: "主页"; active: root.page == "home" || root.page == "detail"; clicked => { root.nav("home"); } }
-                NavButton { label: "资料库"; active: root.page == "library"; clicked => { root.nav("library"); } }
-                NavButton { label: "搜索"; active: root.page == "search"; clicked => { root.nav("search"); } }
-                NavButton { label: "设置"; active: root.page == "settings"; clicked => { root.nav("settings"); } }
-                Rectangle { horizontal-stretch: 1; }
-                LineEdit {
-                    width: 250px;
-                    height: 34px;
-                    text <=> root.search-text;
-                    placeholder-text: "搜索歌曲或歌单";
-                    accepted => { root.search(root.search-text); }
-                }
-                Button { text: "搜索"; clicked => { root.search(root.search-text); } }
-                if root.logged-in : Text { width: 110px; text: root.account-name; color: #b9b9be; font-size: 12px; vertical-alignment: center; overflow: elide; }
-                if root.logged-in : Button { text: "退出"; clicked => { root.logout(); } }
-                if !root.logged-in : Button { text: "登录"; clicked => { root.login-open = true; root.refresh-qr(); } }
-            }
-        }
-
-        if root.page == "home" : ScrollView {
-            vertical-stretch: 1;
-            VerticalLayout {
-                padding: 22px; padding-bottom: 126px;
-                spacing: 16px;
-                if root.recent-tracks.length > 0 : Text { text: "最近播放"; color: #f1f1f2; font-size: 24px; font-weight: 700; }
-                if root.recent-tracks.length > 0 : ListView {
-                    min-height: 210px;
-                    for track in root.recent-tracks : TrackRow {
-                        item: track;
-                        current: track.id == root.current-id;
-                        clicked => { root.play-track(track.id); }
-                    }
-                }
-                if root.playlists.length > 0 : Text { text: "推荐歌单"; color: #f1f1f2; font-size: 24px; font-weight: 700; }
-                if root.playlists.length > 0 : ListView {
-                    min-height: 190px;
-                    for item in root.playlists : PlaylistCard {
-                        item: item;
-                        clicked => { root.open-playlist(item.id); }
-                    }
-                }
-                if root.daily-tracks.length > 0 : Text { text: "每日推荐"; color: #f1f1f2; font-size: 24px; font-weight: 700; }
-                if root.daily-tracks.length > 0 : ListView {
-                    min-height: 210px;
-                    for track in root.daily-tracks : TrackRow {
-                        item: track;
-                        current: track.id == root.current-id;
-                        clicked => { root.play-track(track.id); }
-                    }
-                }
-                if root.new-tracks.length > 0 : Text { text: "新歌速递"; color: #f1f1f2; font-size: 24px; font-weight: 700; }
-                if root.new-tracks.length > 0 : ListView {
-                    min-height: 190px;
-                    for track in root.new-tracks : TrackRow {
-                        item: track;
-                        current: track.id == root.current-id;
-                        clicked => { root.play-track(track.id); }
-                    }
-                }
-            }
-        }
-
-        if root.page == "library" : ScrollView {
-            vertical-stretch: 1;
-            VerticalLayout {
-                padding: 22px; padding-bottom: 126px;
+                padding-right: 10px;
                 spacing: 14px;
-                Text { text: "资料库"; color: #f1f1f2; font-size: 28px; font-weight: 700; }
-                Text { text: "我的歌单"; color: #f1f1f2; font-size: 22px; font-weight: 650; }
-                ListView {
-                    min-height: 260px;
-                    for item in root.library-playlists : PlaylistCard {
-                        item: item;
-                        clicked => { root.open-playlist(item.id); }
-                    }
-                }
-                Text { text: "最近播放"; color: #f1f1f2; font-size: 22px; font-weight: 650; }
-                ListView {
-                    min-height: 260px;
-                    for track in root.library-tracks : TrackRow {
-                        item: track;
-                        current: track.id == root.current-id;
-                        clicked => { root.play-track(track.id); }
-                    }
-                }
-            }
-        }
+                alignment: center;
 
-        if root.page == "search" : ScrollView {
-            vertical-stretch: 1;
-            VerticalLayout {
-                padding: 22px; padding-bottom: 126px;
-                spacing: 14px;
-                Text { text: "搜索结果"; color: #f1f1f2; font-size: 28px; font-weight: 700; }
-                Text { text: "歌曲"; color: #f1f1f2; font-size: 20px; font-weight: 650; }
-                ListView {
-                    min-height: 240px;
-                    for track in root.search-tracks : TrackRow {
-                        item: track;
-                        current: track.id == root.current-id;
-                        clicked => { root.play-track(track.id); }
-                    }
-                }
-                Text { text: "歌单"; color: #f1f1f2; font-size: 20px; font-weight: 650; }
-                ListView {
-                    min-height: 200px;
-                    for item in root.search-playlists : PlaylistCard {
-                        item: item;
-                        clicked => { root.open-playlist(item.id); }
-                    }
-                }
-            }
-        }
-
-        if root.page == "detail" : ScrollView {
-            vertical-stretch: 1;
-            VerticalLayout {
-                padding: 22px; padding-bottom: 126px;
-                spacing: 14px;
-                Button { text: "← 返回"; clicked => { root.nav("home"); } }
                 HorizontalLayout {
-                    spacing: 16px;
-                    Rectangle {
-                        width: 104px; height: 104px;
-                        border-radius: 14px;
-                        background: root.detail-cover-tint;
-                        clip: true;
-                        Image { width: 100%; height: 100%; source: root.detail-cover-image; image-fit: cover; }
+                    width: 184px;
+                    spacing: 9px;
+                    alignment: center;
+                    Image {
+                        width: 27px;
+                        height: 27px;
+                        source: @image-url("../assets/icon.png");
+                        image-fit: contain;
                     }
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 6px;
+                    Text { text: "Decro"; color: #f5f5f7; font-size: 14px; font-weight: 700; vertical-alignment: center; }
+                    Text { text: "DESKTOP"; color: #8e8e93; font-size: 8px; font-weight: 650; letter-spacing: 1.4px; vertical-alignment: center; }
+                }
+
+                IconButton {
+                    icon: @image-url("../assets/icons/chevron-left.svg");
+                    icon-size: 16px;
+                    width: 28px;
+                    height: 28px;
+                    clicked => { root.nav("home"); }
+                }
+                IconButton {
+                    icon: @image-url("../assets/icons/chevron-right.svg");
+                    icon-size: 16px;
+                    width: 28px;
+                    height: 28px;
+                    tint: #4f4f55;
+                    clicked => { }
+                }
+
+                Rectangle {
+                    width: 400px;
+                    height: 30px;
+                    border-radius: 9px;
+                    background: search-trigger-tap.has-hover ? #ffffff12 : #ffffff09;
+                    border-width: 1px;
+                    border-color: #ffffff12;
+                    animate background { duration: 140ms; }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 8px;
+                        spacing: 8px;
                         alignment: center;
-                        Text { text: root.detail-title; color: #f1f1f2; font-size: 24px; font-weight: 700; overflow: elide; }
-                        Text { text: root.detail-meta; color: #8d8d93; font-size: 12px; overflow: elide; }
-                        Text { text: root.detail-description; color: #85858a; font-size: 11px; wrap: word-wrap; max-height: 34px; overflow: elide; }
+                        Glyph { source: @image-url("../assets/icons/search.svg"); glyph-size: 15px; tint: #8e8e93; }
+                        Text { horizontal-stretch: 1; text: "搜索歌曲、歌单或命令"; color: #8e8e93; font-size: 11px; vertical-alignment: center; overflow: elide; }
+                        Rectangle {
+                            height: 18px;
+                            width: 38px;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: #ffffff12;
+                            background: #ffffff08;
+                            Text { text: "Ctrl K"; color: #8e8e93; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    search-trigger-tap := TouchArea { clicked => { root.nav("search"); } }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Rectangle {
+                    height: 30px;
+                    width: 120px;
+                    border-radius: 15px;
+                    background: account-tap.has-hover ? #ffffff0d : transparent;
+                    HorizontalLayout {
+                        padding-left: 3px;
+                        padding-right: 7px;
+                        spacing: 7px;
+                        alignment: center;
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 12px;
+                            background: @linear-gradient(135deg, #7e838d, #3c4149);
+                            Text { text: root.account-initial; color: #ffffff; font-size: 10px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Text { text: root.logged-in ? root.account-name : "登录"; color: #c7c7cc; font-size: 11px; vertical-alignment: center; overflow: elide; }
+                    }
+                    account-tap := TouchArea {
+                        clicked => {
+                            if root.logged-in {
+                                root.nav("settings");
+                            } else {
+                                root.login-open = true;
+                                root.refresh-qr();
+                            }
+                        }
                     }
                 }
-                ListView {
-                    min-height: 420px;
-                    for track in root.detail-tracks : TrackRow {
-                        item: track;
-                        current: track.id == root.current-id;
-                        clicked => { root.play-detail(track.id); }
-                    }
+
+                IconButton {
+                    icon: @image-url("../assets/icons/grid.svg");
+                    icon-size: 17px;
+                    width: 28px;
+                    height: 28px;
+                    clicked => { root.nav("explore"); }
+                }
+                IconButton {
+                    icon: @image-url("../assets/icons/settings.svg");
+                    icon-size: 17px;
+                    width: 28px;
+                    height: 28px;
+                    clicked => { root.nav("settings"); }
+                }
+
+                Rectangle {
+                    height: 26px;
+                    width: 1px;
+                    background: #ffffff14;
+                }
+
+                IconButton {
+                    icon: @image-url("../assets/icons/minimize.svg");
+                    icon-size: 13px;
+                    width: 34px;
+                    height: 30px;
+                    clicked => { root.minimized = true; }
+                }
+                IconButton {
+                    icon: @image-url("../assets/icons/maximize.svg");
+                    icon-size: 12px;
+                    width: 34px;
+                    height: 30px;
+                    clicked => { root.maximized = !root.maximized; }
+                }
+                IconButton {
+                    icon: @image-url("../assets/icons/close.svg");
+                    icon-size: 13px;
+                    width: 34px;
+                    height: 30px;
+                    danger: true;
+                    clicked => { root.close(); }
                 }
             }
         }
 
-        if root.page == "settings" : ScrollView {
-            vertical-stretch: 1;
-            VerticalLayout {
-                padding: 22px; padding-bottom: 126px;
-                spacing: 16px;
-                Text { text: "设置"; color: #f1f1f2; font-size: 28px; font-weight: 700; }
-
-                Text { text: "账号"; color: #9a9a9f; font-size: 13px; font-weight: 600; }
-                Rectangle {
-                    height: 64px;
-                    border-radius: 12px;
-                    background: #171719;
-                    HorizontalLayout {
-                        padding-left: 16px; padding-right: 16px;
-                        spacing: 12px;
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            alignment: center;
-                            spacing: 2px;
-                            Text { text: root.logged-in ? root.account-name : "未登录"; color: #f1f1f2; font-size: 14px; overflow: elide; }
-                            Text { text: root.logged-in ? "UID " + root.account-id : "扫码或导入 Cookie"; color: #85858a; font-size: 11px; overflow: elide; }
-                        }
-                        if root.logged-in : Button { text: "退出登录"; clicked => { root.logout(); } }
-                    }
-                }
-
-                Text { text: "播放音质（下一首生效）"; color: #9a9a9f; font-size: 13px; font-weight: 600; }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Chip { label: "标准"; active: root.quality == "standard"; clicked => { root.set-quality("standard"); } }
-                    Chip { label: "较高"; active: root.quality == "higher"; clicked => { root.set-quality("higher"); } }
-                    Chip { label: "极高"; active: root.quality == "exhigh"; clicked => { root.set-quality("exhigh"); } }
-                    Chip { label: "无损"; active: root.quality == "lossless"; clicked => { root.set-quality("lossless"); } }
-                    Chip { label: "Hi-Res"; active: root.quality == "hires"; clicked => { root.set-quality("hires"); } }
-                }
-
-                Text { text: "日志级别"; color: #9a9a9f; font-size: 13px; font-weight: 600; }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Chip { label: "Debug"; active: root.log-level == "debug"; clicked => { root.set-log-level("debug"); } }
-                    Chip { label: "Info"; active: root.log-level == "info"; clicked => { root.set-log-level("info"); } }
-                    Chip { label: "Warn"; active: root.log-level == "warn"; clicked => { root.set-log-level("warn"); } }
-                    Chip { label: "Error"; active: root.log-level == "error"; clicked => { root.set-log-level("error"); } }
-                    Chip { label: "关闭"; active: root.log-level == "none"; clicked => { root.set-log-level("none"); } }
-                }
-
-                Text { text: "数据与日志"; color: #9a9a9f; font-size: 13px; font-weight: 600; }
-                Rectangle {
-                    height: 64px;
-                    border-radius: 12px;
-                    background: #171719;
-                    HorizontalLayout {
-                        padding-left: 16px; padding-right: 16px;
-                        spacing: 12px;
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            alignment: center;
-                            spacing: 2px;
-                            Text { text: "数据目录"; color: #85858a; font-size: 11px; }
-                            Text { text: root.data-dir; color: #b9b9be; font-size: 12px; overflow: elide; }
-                        }
-                        Button { text: "打开日志目录"; clicked => { root.open-log-folder(); } }
-                    }
-                }
-
-                Text { text: "Decro Slint 0.1.3 · 原生 UI · 软件渲染 · 便携数据"; color: #6f6f75; font-size: 11px; }
-            }
-        }
-
-    }
-
-    // Floating status toast, above the dock.
-    if root.status-text != "" && !root.player-open : Rectangle {
-        x: 18px;
-        y: root.height - 136px;
-        width: min(root.width - 36px, 560px);
-        height: 26px;
-        z: 29;
-        border-radius: 13px;
-        background: #101012e6;
-        border-width: 1px;
-        border-color: #ffffff14;
-        drop-shadow-color: #00000080;
-        drop-shadow-blur: 12px;
-        drop-shadow-offset-y: 4px;
-        Text {
-            x: 12px; y: 0;
-            width: parent.width - 24px;
-            height: parent.height;
-            text: root.status-text;
-            color: #a8a8ae;
-            font-size: 11px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-    }
-
-    // Floating dock. The cover and metadata open the now-playing page.
-    Rectangle {
-        visible: !root.player-open;
-        x: 18px;
-        y: root.height - 100px;
-        width: root.width - 36px;
-        height: 82px;
-        z: 30;
-        border-radius: 24px;
-        background: @linear-gradient(180deg, #1e1e22ee 0%, #141417ee 100%);
-        border-width: 1px;
-        border-color: #ffffff1c;
-        drop-shadow-color: #000000b3;
-        drop-shadow-blur: 28px;
-        drop-shadow-offset-y: 10px;
-        TouchArea { }
-
-        Rectangle {
-            x: (parent.width - 36px) / 2;
-            y: 4px;
-            width: 36px;
-            height: 2px;
-            border-radius: 1px;
-            background: #ffffff2e;
-        }
-
+        // ── Workspace ───────────────────────────────────────────────────
         HorizontalLayout {
-            padding-left: 10px;
-            padding-right: 14px;
-            spacing: 12px;
-            alignment: center;
+            vertical-stretch: 1;
+            spacing: 0px;
 
             Rectangle {
-                width: 60px;
-                height: 60px;
-                border-radius: 16px;
-                background: root.current-cover;
-                clip: true;
-                drop-shadow-color: #00000066;
-                drop-shadow-blur: 10px;
-                drop-shadow-offset-y: 4px;
-                Image {
-                    width: 100%; height: 100%;
-                    source: root.current-cover-image;
-                    image-fit: cover;
-                    transform-scale-x: cover-tap.has-hover ? 104% : 100%;
-                    transform-scale-y: cover-tap.has-hover ? 104% : 100%;
-                    animate transform-scale-x, transform-scale-y { duration: 180ms; }
-                }
-                if root.current-cover-image.width == 0 : Text {
-                    x: 0; y: 0; width: 100%; height: 100%;
-                    text: "♪";
-                    color: #ffffff88;
-                    font-size: 22px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    visible: cover-tap.has-hover;
-                    x: 0; y: 0;
-                    width: 100%; height: 100%;
-                    background: #00000066;
-                    Text {
-                        text: "↗";
-                        color: #ffffff;
-                        font-size: 20px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                cover-tap := TouchArea { clicked => { root.open-player(); } }
-            }
-
-            Rectangle {
-                width: 190px;
-                height: 60px;
-                background: transparent;
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 3px;
-                    Text { text: root.current-title; color: #f1f1f2; font-size: 13px; font-weight: 600; overflow: elide; }
-                    Text { text: root.current-artist; color: #8e8e93; font-size: 10px; overflow: elide; }
-                }
-                TouchArea { clicked => { root.open-player(); } }
-            }
-
-            DockIconButton { glyph: "⏮"; clicked => { root.prev(); } }
-            DockIconButton {
-                glyph: root.loading ? "…" : (root.playing ? "⏸" : "▶");
-                primary: true;
-                clicked => { root.toggle-play(); }
-            }
-            DockIconButton { glyph: "⏭"; clicked => { root.next(); } }
-
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 3px;
-                alignment: center;
-                HorizontalLayout {
-                    Text { text: root.position-text; color: #8e8e93; font-size: 9px; }
-                    Rectangle { horizontal-stretch: 1; }
-                    Text { text: root.duration-text; color: #8e8e93; font-size: 9px; }
-                }
-                Slider {
-                    minimum: 0; maximum: root.duration; value <=> root.progress;
-                    changed(value) => { root.seek(value); }
-                }
-            }
-
-            Rectangle {
-                width: 68px;
-                height: 22px;
-                border-radius: 11px;
-                background: #7aa9f01a;
+                width: root.sidebar-width;
+                background: #08080a;
                 border-width: 1px;
-                border-color: #7aa9f033;
-                Text {
-                    text: root.current-quality;
-                    color: #9fc0f5;
-                    font-size: 9px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 4px;
-                Text { text: "音量"; color: #8e8e93; font-size: 9px; vertical-alignment: center; }
-                Slider {
-                    width: 86px; minimum: 0; maximum: 1; value <=> root.volume;
-                    changed(value) => { root.volume-changed(value); }
-                    released(value) => { root.volume-released(value); }
-                }
-            }
-
-            DockPill { label: "歌词"; clicked => { root.open-player(); } }
-        }
-    }
-
-    // Now playing / song details.
-    if root.player-open : Rectangle {
-        x: 0; y: 0;
-        width: root.width;
-        height: root.height;
-        z: 40;
-        background: #08090b;
-
-        Image {
-            x: -root.width * 0.1;
-            y: -root.height * 0.1;
-            width: root.width * 1.2;
-            height: root.height * 1.2;
-            source: root.current-backdrop;
-            image-fit: cover;
-            opacity: 0.85;
-        }
-        Rectangle {
-            width: 100%; height: 100%;
-            background: @linear-gradient(180deg, #08090bcc 0%, #08090be8 55%, #08090b 100%);
-        }
-        Rectangle {
-            x: -160px;
-            y: root.height - 520px;
-            width: 700px;
-            height: 700px;
-            background: @radial-gradient(circle, #c9202744 0%, #c9202700 70%);
-        }
-        Rectangle {
-            x: 40px;
-            y: 140px;
-            width: 320px;
-            height: 320px;
-            border-radius: 160px;
-            background: root.current-cover;
-            opacity: 0.16;
-            drop-shadow-color: root.current-cover;
-            drop-shadow-blur: 90px;
-        }
-
-        TouchArea { }
-
-        VerticalLayout {
-            padding: 26px;
-            spacing: 14px;
-
-            HorizontalLayout {
-                spacing: 12px;
-                alignment: center;
-                DockIconButton { glyph: "⌄"; clicked => { root.close-player(); } }
-                Text { text: "正在播放"; color: #ffffffb8; font-size: 11px; font-weight: 650; letter-spacing: 1px; vertical-alignment: center; }
+                border-color: #ffffff0d;
                 VerticalLayout {
-                    alignment: center;
-                    Rectangle { width: 6px; height: 6px; border-radius: 3px; background: #ff645d; }
-                }
-                Text { text: "网易云音乐"; color: #ffffff40; font-size: 10px; vertical-alignment: center; }
-                Rectangle { horizontal-stretch: 1; }
-                Text { text: root.current-quality; color: #ffffff66; font-size: 10px; vertical-alignment: center; }
-                DockPill { label: "收起"; width: 58px; clicked => { root.close-player(); } }
-            }
-
-            HorizontalLayout {
-                spacing: 34px;
-                vertical-stretch: 1;
-
-                VerticalLayout {
-                    width: 350px;
-                    spacing: 14px;
-                    alignment: center;
-
+                    padding-top: 16px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 3px;
+                    NavIcon {
+                        icon: @image-url("../assets/icons/home.svg");
+                        active: root.page == "home" || root.page == "detail";
+                        clicked => { root.nav("home"); }
+                    }
+                    NavIcon {
+                        icon: @image-url("../assets/icons/grid.svg");
+                        active: root.page == "explore";
+                        clicked => { root.nav("explore"); }
+                    }
+                    NavIcon {
+                        icon: @image-url("../assets/icons/library.svg");
+                        active: root.page == "library";
+                        clicked => { root.nav("library"); }
+                    }
+                    NavIcon {
+                        icon: @image-url("../assets/icons/search.svg");
+                        active: root.page == "search";
+                        clicked => { root.nav("search"); }
+                    }
+                    Rectangle { vertical-stretch: 1; }
                     Rectangle {
-                        width: 320px;
-                        height: 320px;
-                        border-radius: 24px;
-                        background: root.current-cover;
-                        clip: true;
-                        drop-shadow-color: #000000b3;
-                        drop-shadow-blur: 46px;
-                        drop-shadow-offset-y: 20px;
-                        Image { width: 100%; height: 100%; source: root.current-cover-image; image-fit: cover; }
-                        if root.current-cover-image.width == 0 : Text {
-                            x: 0; y: 0; width: 100%; height: 100%;
-                            text: "♪";
-                            color: #ffffff55;
-                            font-size: 64px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Text {
-                        text: root.current-title;
-                        color: #f7f7f8;
-                        font-size: 24px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        wrap: word-wrap;
-                        max-height: 64px;
-                        overflow: elide;
-                    }
-                    Text { text: root.current-artist; color: #c7c7cc; font-size: 14px; horizontal-alignment: center; overflow: elide; }
-                    Text { text: root.current-album; color: #8e8e93; font-size: 11px; horizontal-alignment: center; overflow: elide; }
-
-                    HorizontalLayout {
-                        spacing: 18px;
-                        alignment: center;
-                        DockIconButton { glyph: "⏮"; width: 40px; height: 40px; clicked => { root.prev(); } }
-                        DockIconButton {
-                            glyph: root.loading ? "…" : (root.playing ? "⏸" : "▶");
-                            primary: true;
-                            width: 54px;
-                            height: 54px;
-                            clicked => { root.toggle-play(); }
-                        }
-                        DockIconButton { glyph: "⏭"; width: 40px; height: 40px; clicked => { root.next(); } }
-                    }
-
-                    VerticalLayout {
-                        width: 100%;
-                        spacing: 3px;
-                        HorizontalLayout {
-                            Text { text: root.position-text; color: #8e8e93; font-size: 9px; }
-                            Rectangle { horizontal-stretch: 1; }
-                            Text { text: root.duration-text; color: #8e8e93; font-size: 9px; }
-                        }
-                        Slider {
-                            minimum: 0; maximum: root.duration; value <=> root.progress;
-                            changed(value) => { root.seek(value); }
-                        }
-                    }
-                }
-
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 8px;
-
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text { text: "歌词"; color: #f1f1f2; font-size: 18px; font-weight: 700; vertical-alignment: center; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Text {
-                            text: root.lyric-follow ? "滚轮或拖动查看，点击歌词跳转" : "已暂停自动跟随";
-                            color: #8e8e93;
-                            font-size: 10px;
-                            vertical-alignment: center;
-                        }
-                        if !root.lyric-follow : DockPill {
-                            label: "回到当前";
-                            width: 86px;
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 20px;
+                        background: @linear-gradient(135deg, #7e838d, #3c4149);
+                        Text { text: root.account-initial; color: #ffffff; font-size: 12px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                        sidebar-avatar-tap := TouchArea {
                             clicked => {
-                                root.lyric-follow = true;
-                                root.lyric-scroll-y = root.lyric-target-y;
-                            }
-                        }
-                    }
-
-                    Flickable {
-                        height: root.lyric-view-height;
-                        content-width: self.width;
-                        content-height: root.lyrics.length * root.lyric-line-height;
-                        content-y <=> root.lyric-scroll-y;
-                        flicked => { root.lyric-follow = false; }
-                        for line[index] in root.lyrics : Rectangle {
-                            y: index * root.lyric-line-height;
-                            width: parent.width;
-                            height: root.lyric-line-height;
-                            background: line-tap.has-hover ? #ffffff09 : transparent;
-                            animate background { duration: 120ms; }
-                            Rectangle {
-                                x: 0;
-                                y: (root.lyric-line-height - 18px) / 2;
-                                width: 3px;
-                                height: 18px;
-                                border-radius: 2px;
-                                background: #ff645d;
-                                visible: index == root.lyric-index;
-                            }
-                            Text {
-                                x: 14px;
-                                width: parent.width - 28px;
-                                height: parent.height;
-                                text: line.text;
-                                color: index == root.lyric-index ? #ffffff : #77777d;
-                                font-size: index == root.lyric-index ? 21px : 14px;
-                                font-weight: index == root.lyric-index ? 700 : 400;
-                                vertical-alignment: center;
-                                horizontal-alignment: center;
-                                overflow: elide;
-                                animate color { duration: 160ms; }
-                                animate font-size { duration: 160ms; }
-                            }
-                            line-tap := TouchArea {
-                                clicked => {
-                                    root.lyric-follow = true;
-                                    root.lyric-scroll-y = root.lyric-y-for(index);
-                                    root.seek-lyric(line.time);
+                                if root.logged-in {
+                                    root.nav("settings");
+                                } else {
+                                    root.login-open = true;
+                                    root.refresh-qr();
                                 }
                             }
                         }
                     }
                 }
             }
+
+            // ── Page area ─────────────────────────────────────────────────
+            Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;
+                opacity: root.page-opacity;
+
+                if root.page == "home" : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 30px;
+                        padding-bottom: 140px;
+                        spacing: 24px;
+
+                        HorizontalLayout {
+                            spacing: 16px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text { text: "主页"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: 34px; height: 34px; border-radius: 17px;
+                                background: @linear-gradient(135deg, #7e838d, #3c4149);
+                                Text { text: root.account-initial; color: #fff; font-size: 11px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                                home-avatar-tap := TouchArea { clicked => { if root.logged-in { root.nav("settings"); } else { root.login-open = true; root.refresh-qr(); } } }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 20px;
+                            FeatureCard {
+                                horizontal-stretch: 1;
+                                height: 460px;
+                                item: root.daily-feature;
+                                eyebrow: "今日更新";
+                                clicked => { root.open-daily(); }
+                            }
+                            FeatureCard {
+                                horizontal-stretch: 1;
+                                height: 460px;
+                                item: root.feature-playlist;
+                                eyebrow: "为你推荐";
+                                clicked => {
+                                    if root.feature-playlist.id != "" {
+                                        root.open-playlist(root.feature-playlist.id);
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.playlists.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "推荐歌单"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.playlists.length * 192px;
+                                content-height: self.height;
+                                for item[index] in root.playlists : ShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: item;
+                                    clicked => { root.open-playlist(item.id); }
+                                }
+                            }
+                        }
+
+                        if root.new-tracks.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "新歌速递"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.new-tracks.length * 192px;
+                                content-height: self.height;
+                                for track[index] in root.new-tracks : TrackShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: track;
+                                    clicked => { root.play-track(track.id); }
+                                }
+                            }
+                        }
+
+                        if root.recent-tracks.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.recent-tracks.length * 192px;
+                                content-height: self.height;
+                                for track[index] in root.recent-tracks : TrackShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: track;
+                                    clicked => { root.play-track(track.id); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == "explore" : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 30px;
+                        padding-bottom: 140px;
+                        spacing: 24px;
+
+                        HorizontalLayout {
+                            spacing: 16px;
+                            Text { text: "推荐"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: 34px; height: 34px; border-radius: 17px;
+                                background: @linear-gradient(135deg, #7e838d, #3c4149);
+                                Text { text: root.account-initial; color: #fff; font-size: 11px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+
+                        if root.recent-tracks.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.recent-tracks.length * 192px;
+                                content-height: self.height;
+                                for track[index] in root.recent-tracks : TrackShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: track;
+                                    clicked => { root.play-track(track.id); }
+                                }
+                            }
+                        }
+
+                        if root.playlists.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "推荐歌单"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.playlists.length * 192px;
+                                content-height: self.height;
+                                for item[index] in root.playlists : ShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: item;
+                                    clicked => { root.open-playlist(item.id); }
+                                }
+                            }
+                        }
+
+                        if root.daily-tracks.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "每日推荐"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.daily-tracks.length * 192px;
+                                content-height: self.height;
+                                for track[index] in root.daily-tracks : TrackShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: track;
+                                    clicked => { root.play-track(track.id); }
+                                }
+                            }
+                        }
+
+                        if root.new-tracks.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "新歌速递"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.new-tracks.length * 192px;
+                                content-height: self.height;
+                                for track[index] in root.new-tracks : TrackShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: track;
+                                    clicked => { root.play-track(track.id); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == "library" : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 30px;
+                        padding-bottom: 140px;
+                        spacing: 20px;
+
+                        HorizontalLayout {
+                            spacing: 16px;
+                            Text { text: "资料库"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: 34px; height: 34px; border-radius: 17px;
+                                background: @linear-gradient(135deg, #7e838d, #3c4149);
+                                Text { text: root.account-initial; color: #fff; font-size: 11px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+
+                        if !root.logged-in : Rectangle {
+                            height: 88px;
+                            border-radius: 16px;
+                            background: #1b1c1e;
+                            border-width: 1px;
+                            border-color: #ffffff10;
+                            HorizontalLayout {
+                                padding: 14px;
+                                spacing: 14px;
+                                alignment: center;
+                                Rectangle {
+                                    width: 52px; height: 52px; border-radius: 26px; background: #c92027;
+                                    Glyph { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: @image-url("../assets/icons/user.svg"); glyph-size: 24px; tint: #fff; }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 4px;
+                                    alignment: center;
+                                    Text { text: "登录网易云音乐"; color: #f5f5f7; font-size: 15px; font-weight: 650; }
+                                    Text { text: "扫码后自动同步你的歌单、喜欢的歌曲和最近播放。"; color: #8e8e93; font-size: 11px; overflow: elide; }
+                                }
+                                Glyph { source: @image-url("../assets/icons/chevron-right.svg"); glyph-size: 16px; tint: #77777d; }
+                            }
+                            library-login-tap := TouchArea { clicked => { root.login-open = true; root.refresh-qr(); } }
+                        }
+
+                        if root.logged-in && root.library-playlists.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "我的歌单"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            ListView {
+                                min-height: 360px;
+                                for item in root.library-playlists : PlaylistRow {
+                                    item: item;
+                                    clicked => { root.open-playlist(item.id); }
+                                }
+                            }
+                        }
+
+                        if root.logged-in && root.library-tracks.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            ListView {
+                                min-height: 360px;
+                                for track in root.library-tracks : MediaRow {
+                                    item: track;
+                                    current: track.id == root.current-id;
+                                    clicked => { root.play-track(track.id); }
+                                }
+                            }
+                        }
+
+                        if !root.logged-in : Text {
+                            text: "登录后，你的歌单和最近播放会显示在这里。";
+                            color: #77777d;
+                            font-size: 12px;
+                        }
+                    }
+                }
+
+                if root.page == "search" : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 30px;
+                        padding-bottom: 140px;
+                        spacing: 20px;
+
+                        HorizontalLayout {
+                            spacing: 16px;
+                            Text { text: "搜索"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: 34px; height: 34px; border-radius: 17px;
+                                background: @linear-gradient(135deg, #7e838d, #3c4149);
+                                Text { text: root.account-initial; color: #fff; font-size: 11px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+
+                        SearchField {
+                            text <=> root.search-text;
+                            placeholder: "搜索歌曲、歌手、歌单";
+                            accepted => { root.search(root.search-text); }
+                        }
+
+                        if root.search-text.is-empty : Text {
+                            text: "输入关键词，搜索网易云音乐。";
+                            color: #77777d;
+                            font-size: 13px;
+                        }
+
+                        if root.search-tracks.length > 0 : VerticalLayout {
+                            spacing: 10px;
+                            Text { text: "歌曲"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            ListView {
+                                min-height: 320px;
+                                for track in root.search-tracks : MediaRow {
+                                    item: track;
+                                    current: track.id == root.current-id;
+                                    clicked => { root.play-track(track.id); }
+                                }
+                            }
+                        }
+
+                        if root.search-playlists.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            Text { text: "歌单"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.search-playlists.length * 192px;
+                                content-height: self.height;
+                                for item[index] in root.search-playlists : ShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: item;
+                                    clicked => { root.open-playlist(item.id); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == "detail" : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding-bottom: 140px;
+                        spacing: 0px;
+
+                        Rectangle {
+                            height: 430px;
+                            clip: true;
+                            background: root.detail-cover-tint;
+                            Image {
+                                width: 100%;
+                                height: 100%;
+                                source: root.detail-backdrop;
+                                image-fit: cover;
+                                opacity: 0.9;
+                            }
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                background: @linear-gradient(180deg, #00000066 0%, #00000055 45%, #000000f2 100%);
+                            }
+                            IconButton {
+                                x: 24px; y: 20px;
+                                icon: @image-url("../assets/icons/arrow-left.svg");
+                                icon-size: 18px;
+                                width: 38px; height: 38px;
+                                border-radius: 19px;
+                                background: #00000033;
+                                border-width: 1px;
+                                border-color: #ffffff1a;
+                                clicked => { root.nav("home"); }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 10px;
+                                padding-top: 70px;
+                                Text {
+                                    text: root.detail-title;
+                                    color: #ffffff;
+                                    font-size: 42px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: root.detail-meta;
+                                    color: #ffffffa8;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: root.detail-description;
+                                    color: #ffffff66;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    wrap: word-wrap;
+                                    max-height: 36px;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    width: 96px;
+                                    height: 64px;
+                                    border-radius: 23px;
+                                    background: detail-play-tap.has-hover ? #ffffff : #f5f4f2;
+                                    drop-shadow-color: #00000066;
+                                    drop-shadow-blur: 24px;
+                                    drop-shadow-offset-y: 8px;
+                                    Glyph { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: @image-url("../assets/icons/play-fill.svg"); glyph-size: 24px; tint: #111111; }
+                                    detail-play-tap := TouchArea {
+                                        clicked => {
+                                            if root.detail-first-id != "" {
+                                                root.play-detail(root.detail-first-id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            padding-top: 18px; padding-left: 30px; padding-right: 30px;
+                            spacing: 8px;
+                            if root.detail-tracks.length > 0 : Text {
+                                text: "歌曲";
+                                color: #f5f5f7;
+                                font-size: 20px;
+                                font-weight: 700;
+                            }
+                            ListView {
+                                min-height: 560px;
+                                for track in root.detail-tracks : DetailRow {
+                                    item: track;
+                                    current: track.id == root.current-id;
+                                    clicked => { root.play-detail(track.id); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == "settings" : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 30px;
+                        padding-bottom: 140px;
+                        spacing: 16px;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            IconButton {
+                                icon: @image-url("../assets/icons/close.svg");
+                                icon-size: 17px;
+                                width: 34px; height: 34px; border-radius: 17px;
+                                background: #ffffff0d;
+                                clicked => { root.nav("home"); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        Rectangle {
+                            width: 980px;
+                            background: #1b1c1e;
+                            border-radius: 24px;
+                            border-width: 1px;
+                            border-color: #ffffff10;
+                            VerticalLayout {
+                                padding: 22px;
+                                spacing: 16px;
+                                Text { text: "账户与设置"; color: #f5f5f7; font-size: 20px; font-weight: 700; horizontal-alignment: center; }
+
+                                Rectangle {
+                                    height: 88px;
+                                    border-radius: 16px;
+                                    background: #242528;
+                                    HorizontalLayout {
+                                        padding: 14px;
+                                        spacing: 14px;
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 56px; height: 56px; border-radius: 28px;
+                                            background: @linear-gradient(135deg, #7e838d, #3c4149);
+                                            Text { text: root.account-initial; color: #fff; font-size: 18px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 4px;
+                                            alignment: center;
+                                            Text { text: root.logged-in ? root.account-name : "网易云未登录"; color: #f5f5f7; font-size: 15px; font-weight: 600; overflow: elide; }
+                                            Text { text: root.logged-in ? "UID " + root.account-id : "点击扫码登录"; color: #8e8e93; font-size: 11px; overflow: elide; }
+                                        }
+                                        if root.logged-in : PillButton { label: "退出登录"; clicked => { root.logout(); } }
+                                        if !root.logged-in : PillButton { label: "登录"; primary: true; clicked => { root.login-open = true; root.refresh-qr(); } }
+                                    }
+                                }
+
+                                Text { text: "播放音质（下一首生效）"; color: #8e8e93; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    PillButton { label: "标准"; primary: root.quality == "standard"; clicked => { root.set-quality("standard"); } }
+                                    PillButton { label: "较高"; primary: root.quality == "higher"; clicked => { root.set-quality("higher"); } }
+                                    PillButton { label: "极高"; primary: root.quality == "exhigh"; clicked => { root.set-quality("exhigh"); } }
+                                    PillButton { label: "无损"; primary: root.quality == "lossless"; clicked => { root.set-quality("lossless"); } }
+                                    PillButton { label: "Hi-Res"; primary: root.quality == "hires"; clicked => { root.set-quality("hires"); } }
+                                }
+
+                                Text { text: "日志级别"; color: #8e8e93; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    PillButton { label: "Debug"; primary: root.log-level == "debug"; clicked => { root.set-log-level("debug"); } }
+                                    PillButton { label: "Info"; primary: root.log-level == "info"; clicked => { root.set-log-level("info"); } }
+                                    PillButton { label: "Warn"; primary: root.log-level == "warn"; clicked => { root.set-log-level("warn"); } }
+                                    PillButton { label: "Error"; primary: root.log-level == "error"; clicked => { root.set-log-level("error"); } }
+                                    PillButton { label: "关闭"; primary: root.log-level == "none"; clicked => { root.set-log-level("none"); } }
+                                }
+
+                                Text { text: "数据与日志"; color: #8e8e93; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
+                                Rectangle {
+                                    height: 64px;
+                                    border-radius: 16px;
+                                    background: #242528;
+                                    HorizontalLayout {
+                                        padding-left: 16px;
+                                        padding-right: 16px;
+                                        spacing: 12px;
+                                        alignment: center;
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 3px;
+                                            alignment: center;
+                                            Text { text: "数据目录"; color: #8e8e93; font-size: 10px; }
+                                            Text { text: root.data-dir; color: #c7c7cc; font-size: 11px; overflow: elide; }
+                                        }
+                                        PillButton { label: "打开日志目录"; width: 120px; clicked => { root.open-log-folder(); } }
+                                    }
+                                }
+
+                                Text { text: "Decro 0.2.0 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
+    // ── Dock ─────────────────────────────────────────────────────────────
+    Rectangle {
+        visible: !root.player-open;
+        x: root.sidebar-width + 26px;
+        y: root.height - root.dock-height - 18px;
+        width: root.width - root.sidebar-width - 52px;
+        height: root.dock-height;
+        z: 30;
+        border-radius: 26px;
+        background: #1b1c1e;
+        border-width: 1px;
+        border-color: #ffffff12;
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 22px;
+            spacing: 14px;
+            alignment: center;
+
+            Rectangle {
+                width: 62px;
+                height: 62px;
+                border-radius: 16px;
+                background: root.current-cover;
+                clip: true;
+                drop-shadow-color: #0000003d;
+                drop-shadow-blur: 16px;
+                drop-shadow-offset-y: 5px;
+                Image {
+                    width: 100%; height: 100%;
+                    source: root.current-cover-image;
+                    image-fit: cover;
+                    transform-scale-x: dock-cover-tap.has-hover ? 104% : 100%;
+                    transform-scale-y: dock-cover-tap.has-hover ? 104% : 100%;
+                    animate transform-scale-x, transform-scale-y { duration: 180ms; }
+                }
+                if root.current-cover-image.width == 0 : Text {
+                    x: 0; y: 0; width: 100%; height: 100%;
+                    text: "♪";
+                    color: #ffffff88;
+                    font-size: 24px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    visible: dock-cover-tap.has-hover;
+                    x: 0; y: 0; width: 100%; height: 100%;
+                    background: #00000066;
+                    Glyph { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: @image-url("../assets/icons/expand.svg"); glyph-size: 18px; tint: #fff; }
+                }
+                dock-cover-tap := TouchArea { clicked => { root.open-player(); } }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 62px;
+                background: transparent;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Text { text: root.current-title; color: #f5f5f7; font-size: 16px; font-weight: 550; overflow: elide; }
+                    Text { text: root.current-artist; color: #8e8e93; font-size: 13px; overflow: elide; }
+                }
+                TouchArea { clicked => { root.open-player(); } }
+            }
+
+            RoundIconButton {
+                icon: root.loading ? @image-url("../assets/icons/more.svg") : (root.playing ? @image-url("../assets/icons/pause-fill.svg") : @image-url("../assets/icons/play-fill.svg"));
+                icon-size: 22px;
+                button-size: 40px;
+                background-color: transparent;
+                clicked => { root.toggle-play(); }
+            }
+            RoundIconButton {
+                icon: @image-url("../assets/icons/next.svg");
+                icon-size: 20px;
+                button-size: 40px;
+                background-color: transparent;
+                clicked => { root.next(); }
+            }
+        }
+
+        Rectangle {
+            x: 10px;
+            y: parent.height - 6px;
+            width: parent.width - 20px;
+            height: 2px;
+            border-radius: 1px;
+            background: #ffffff24;
+            Rectangle {
+                width: root.duration > 0 ? min(parent.width, parent.width * max(0, min(1, root.progress / root.duration))) : 0px;
+                height: 100%;
+                border-radius: 1px;
+                background: #ff645d;
+            }
+        }
+    }
+
+    // ── Toast ────────────────────────────────────────────────────────────
+    if root.status-text != "" && !root.player-open : Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - 146px;
+        width: min(root.width - 80px, 560px);
+        height: 34px;
+        z: 29;
+        border-radius: 17px;
+        background: #1b1c1ee8;
+        border-width: 1px;
+        border-color: #ffffff1a;
+        drop-shadow-color: #00000080;
+        drop-shadow-blur: 16px;
+        drop-shadow-offset-y: 5px;
+        Text {
+            x: 16px; y: 0;
+            width: parent.width - 32px;
+            height: parent.height;
+            text: root.status-text;
+            color: #c7c7cc;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    // ── Login modal ──────────────────────────────────────────────────────
+    if root.login-open && !root.logged-in : Rectangle {
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+        z: 200;
+        background: #000000cc;
+        TouchArea { }
+        Rectangle {
+            width: 420px;
+            height: 650px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            border-radius: 28px;
+            background: #1b1c1e;
+            border-width: 1px;
+            border-color: #ffffff14;
+            drop-shadow-color: #000000b3;
+            drop-shadow-blur: 50px;
+            drop-shadow-offset-y: 20px;
+            VerticalLayout {
+                padding: 26px;
+                spacing: 13px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "登录网易云音乐"; color: #f5f5f7; font-size: 22px; font-weight: 700; horizontal-stretch: 1; vertical-alignment: center; }
+                    IconButton {
+                        icon: @image-url("../assets/icons/close.svg");
+                        icon-size: 15px;
+                        width: 30px; height: 30px; border-radius: 15px;
+                        background: #ffffff0d;
+                        clicked => { root.close-login(); }
+                    }
+                }
+                Text { text: "打开网易云音乐 App 扫码登录"; color: #8e8e93; font-size: 12px; }
+                Rectangle {
+                    height: 280px;
+                    border-radius: 18px;
+                    background: #f5f5f5;
+                    Image { width: 100%; height: 100%; source: root.qr-image; image-fit: contain; }
+                }
+                Text {
+                    text: root.status-text;
+                    color: #b7b7bd;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    min-height: 30px;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    PillButton { label: "刷新二维码"; primary: true; clicked => { root.refresh-qr(); } }
+                    PillButton { label: "关闭"; clicked => { root.close-login(); } }
+                }
+                TextField {
+                    text <=> root.cookie-text;
+                    placeholder: "或粘贴网页版 MUSIC_U Cookie";
+                    accepted => { root.import-cookie(root.cookie-text); }
+                }
+                PillButton {
+                    label: "导入 Cookie";
+                    width: 100%;
+                    clicked => { root.import-cookie(root.cookie-text); }
+                }
+            }
+        }
+    }
+
+    // ── Full player ──────────────────────────────────────────────────────
+    if root.player-open : Rectangle {
+        x: 0;
+        y: root.titlebar-height;
+        width: root.width;
+        height: root.height - root.titlebar-height;
+        z: 40;
+        background: #090a0c;
+
+        Image {
+            x: -root.width * 0.08;
+            y: -root.height * 0.08;
+            width: root.width * 1.16;
+            height: root.height * 1.16;
+            source: root.current-backdrop;
+            image-fit: cover;
+            opacity: 0.9;
+        }
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @linear-gradient(180deg, #00000030 0%, #00000055 52%, #000000a8 100%);
+        }
+        Rectangle {
+            x: -160px;
+            y: root.height - 620px;
+            width: 780px;
+            height: 780px;
+            background: @radial-gradient(circle, #c9202722 0%, #c9202700 70%);
+        }
+        TouchArea { }
+
+        VerticalLayout {
+            padding-top: 16px; padding-bottom: 18px; padding-left: 40px; padding-right: 40px;
+            spacing: 0px;
+
+            // Player top bar
+            HorizontalLayout {
+                height: 44px;
+                spacing: 12px;
+                alignment: center;
+                Rectangle {
+                    width: 36px; height: 36px; border-radius: 18px;
+                    background: player-close-tap.has-hover ? #ffffff1c : #ffffff0d;
+                    border-width: 1px;
+                    border-color: #ffffff1a;
+                    Glyph { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: @image-url("../assets/icons/chevron-down.svg"); glyph-size: 16px; tint: #ffffffb3; }
+                    player-close-tap := TouchArea { clicked => { root.close-player(); } }
+                }
+                Rectangle { width: 6px; height: 6px; border-radius: 3px; background: #ff645d; }
+                Text { text: "正在播放"; color: #ffffff94; font-size: 10px; font-weight: 650; letter-spacing: 1px; vertical-alignment: center; }
+                Text { text: "网易云音乐"; color: #ffffff4d; font-size: 10px; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Rectangle {
+                    height: 22px;
+                    width: 54px;
+                    border-radius: 5px;
+                    background: #7aa9f01a;
+                    border-width: 1px;
+                    border-color: #7aa9f033;
+                    Text { text: root.current-quality; color: #9fc0f5; font-size: 9px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                }
+                if root.lyrics-mode : PillButton { label: "显示封面"; clicked => { root.lyrics-mode = false; } }
+            }
+
+            // Player body
+            if !root.lyrics-mode : HorizontalLayout {
+                vertical-stretch: 1;
+                padding-top: 10px; padding-bottom: 10px; padding-left: 28px; padding-right: 28px;
+                spacing: 70px;
+                alignment: center;
+
+                VerticalLayout {
+                    width: 40%;
+                    alignment: center;
+                    spacing: 14px;
+                    Rectangle {
+                        width: 360px;
+                        height: 360px;
+                        border-radius: 24px;
+                        background: root.current-cover;
+                        clip: true;
+                        drop-shadow-color: #00000073;
+                        drop-shadow-blur: 54px;
+                        drop-shadow-offset-y: 24px;
+                        Image {
+                            width: 100%; height: 100%;
+                            source: root.current-cover-image;
+                            image-fit: cover;
+                            transform-scale-x: cover-tap.has-hover ? 103% : 100%;
+                            transform-scale-y: cover-tap.has-hover ? 103% : 100%;
+                            animate transform-scale-x, transform-scale-y { duration: 380ms; }
+                        }
+                        if root.current-cover-image.width == 0 : Text {
+                            x: 0; y: 0; width: 100%; height: 100%;
+                            text: "♪";
+                            color: #ffffff66;
+                            font-size: 70px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            width: 100%;
+                            height: 100%;
+                            background: @linear-gradient(180deg, #00000000 55%, #00000055 100%);
+                        }
+                        Text {
+                            x: 18px;
+                            y: parent.height - 28px;
+                            text: root.current-album + " · 网易云音乐";
+                            color: #ffffffa8;
+                            font-size: 9px;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            visible: cover-tap.has-hover;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 130px;
+                            height: 38px;
+                            border-radius: 19px;
+                            background: #00000052;
+                            border-width: 1px;
+                            border-color: #ffffff2e;
+                            Text { text: "查看歌词"; color: #ffffffd9; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        cover-tap := TouchArea { clicked => { root.lyrics-mode = true; } }
+                    }
+                }
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 10px;
+                    Text {
+                        text: root.current-title;
+                        color: #ffffff;
+                        font-size: 42px;
+                        font-weight: 700;
+                        overflow: elide;
+                        horizontal-alignment: left;
+                    }
+                    Text {
+                        text: root.current-artist;
+                        color: #ffffff9e;
+                        font-size: 16px;
+                        overflow: elide;
+                    }
+                    Rectangle { height: 16px; }
+                    Text {
+                        text: "\"" + root.current-album + "\" · " + root.current-artist;
+                        color: #ffffff85;
+                        font-size: 14px;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.current-quality + " · 网易云音乐";
+                        color: #ffffff57;
+                        font-size: 10px;
+                    }
+                    PillButton {
+                        label: "打开歌词";
+                        width: 104px;
+                        clicked => { root.lyrics-mode = true; }
+                    }
+                }
+            }
+
+            if root.lyrics-mode : VerticalLayout {
+                vertical-stretch: 1;
+                padding-top: 8px; padding-left: 100px; padding-right: 100px;
+                spacing: 0px;
+                Text { text: root.current-title; color: #fff; font-size: 40px; font-weight: 700; overflow: elide; }
+                Text { text: root.current-artist; color: #ffffff9e; font-size: 16px; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+                    Rectangle { horizontal-stretch: 1; }
+                    Text { text: root.lyric-follow ? "滚轮或拖动查看，点击歌词跳转" : "已暂停自动跟随"; color: #ffffff5c; font-size: 10px; vertical-alignment: center; }
+                    if !root.lyric-follow : PillButton {
+                        label: "回到当前";
+                        clicked => {
+                            root.lyric-follow = true;
+                            root.lyric-scroll-y = root.lyric-target-y;
+                        }
+                    }
+                }
+                Flickable {
+                    height: root.lyric-view-height;
+                    content-width: self.width;
+                    content-height: root.lyrics.length * root.lyric-line-height;
+                    content-y <=> root.lyric-scroll-y;
+                    flicked => { root.lyric-follow = false; }
+                    for line[index] in root.lyrics : Rectangle {
+                        y: index * root.lyric-line-height;
+                        width: parent.width;
+                        height: root.lyric-line-height;
+                        background: line-tap.has-hover ? #ffffff08 : transparent;
+                        Text {
+                            x: 0;
+                            width: 100%;
+                            height: parent.height;
+                            text: line.text;
+                            color: index == root.lyric-index ? #ffffff : #ffffff78;
+                            font-size: index == root.lyric-index ? 38px : 23px;
+                            font-weight: index == root.lyric-index ? 700 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            animate color { duration: 180ms; }
+                            animate font-size { duration: 180ms; }
+                        }
+                        line-tap := TouchArea {
+                            clicked => {
+                                root.lyric-follow = true;
+                                root.lyric-scroll-y = root.lyric-y-for(index);
+                                root.seek-lyric(line.time);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Transport / progress
+            VerticalLayout {
+                spacing: 4px;
+                SeekBar {
+                    value: root.progress;
+                    maximum: root.duration;
+                    seek(value) => { root.seek(value); }
+                }
+                HorizontalLayout {
+                    Text { text: root.position-text; color: #ffffff7a; font-size: 12px; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text { text: root.duration-text; color: #ffffff7a; font-size: 12px; }
+                }
+                HorizontalLayout {
+                    height: 68px;
+                    spacing: 8px;
+                    alignment: center;
+                    HorizontalLayout {
+                        width: 220px;
+                        spacing: 6px;
+                        alignment: start;
+                        RoundIconButton {
+                            icon: @image-url("../assets/icons/lyrics.svg");
+                            icon-size: 18px;
+                            button-size: 36px;
+                            background-color: root.lyrics-mode ? #ffffff1f : transparent;
+                            clicked => { root.lyrics-mode = !root.lyrics-mode; }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    HorizontalLayout {
+                        spacing: 22px;
+                        alignment: center;
+                        RoundIconButton {
+                            icon: @image-url("../assets/icons/prev.svg");
+                            icon-size: 22px;
+                            button-size: 62px;
+                            clicked => { root.prev(); }
+                        }
+                        Rectangle {
+                            width: 96px;
+                            height: 64px;
+                            border-radius: 23px;
+                            background: play-tap.has-hover ? #ffffff : #f5f4f2;
+                            animate background { duration: 140ms; }
+                            Glyph {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                source: root.loading ? @image-url("../assets/icons/more.svg") : (root.playing ? @image-url("../assets/icons/pause-fill.svg") : @image-url("../assets/icons/play-fill.svg"));
+                                glyph-size: 24px;
+                                tint: #111111;
+                            }
+                            play-tap := TouchArea { clicked => { root.toggle-play(); } }
+                        }
+                        RoundIconButton {
+                            icon: @image-url("../assets/icons/next.svg");
+                            icon-size: 22px;
+                            button-size: 62px;
+                            clicked => { root.next(); }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    HorizontalLayout {
+                        width: 220px;
+                        spacing: 8px;
+                        alignment: end;
+                        Glyph { source: @image-url("../assets/icons/volume.svg"); glyph-size: 18px; tint: #ffffff80; }
+                        VolumeBar {
+                            value <=> root.volume;
+                            changed(value) => { root.volume-changed(value); }
+                            released => { root.volume-released(root.volume); }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
