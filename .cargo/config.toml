@@ -1,0 +1,3 @@
+# Fully static CRT for the portable Windows executable: no VC++ runtime install required.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
