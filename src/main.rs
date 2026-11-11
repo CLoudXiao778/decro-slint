@@ -501,7 +501,7 @@ static WINDOW_RESTORED: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
 fn watch_window_restore() {
     use windows::core::{w, PCWSTR};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow, IsIconic};
 
     let _ = std::thread::Builder::new()
         .name("decro-window-watch".into())
@@ -513,12 +513,17 @@ fn watch_window_restore() {
                 std::thread::sleep(Duration::from_millis(120));
             };
             let mut was_minimized = false;
+            let mut was_foreground = unsafe { GetForegroundWindow() } == hwnd;
             loop {
                 let minimized = unsafe { IsIconic(hwnd) }.as_bool();
-                if was_minimized && !minimized {
+                let foreground = unsafe { GetForegroundWindow() } == hwnd;
+                if (was_minimized && !minimized)
+                    || (!was_foreground && foreground && !minimized)
+                {
                     WINDOW_RESTORED.store(true, Ordering::Relaxed);
                 }
                 was_minimized = minimized;
+                was_foreground = foreground;
                 std::thread::sleep(Duration::from_millis(60));
             }
         });
