@@ -21,7 +21,7 @@ use std::time::Duration;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
-use slint::{Color, ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel, Weak};
+use slint::{Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel, Weak};
 use state::{AppState, ProxyInfo};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -177,7 +177,12 @@ fn format_duration(ms: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-fn track_item(track: &netease::TrackDto) -> TrackItem {
+fn format_clock(seconds: f32) -> String {
+    let total = seconds.max(0.0) as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+fn track_item(track: &netease::TrackDto, cover: Option<Image>) -> TrackItem {
     TrackItem {
         id: track.id.clone().into(),
         title: track.name.clone().into(),
@@ -185,36 +190,159 @@ fn track_item(track: &netease::TrackDto) -> TrackItem {
         meta: track.album.clone().into(),
         duration: format_duration(track.duration_ms).into(),
         quality: track.quality.clone().into(),
-        cover: color_for(&track.id),
+        cover: cover.unwrap_or_default(),
+        tint: color_for(&track.id),
     }
 }
 
-/// Must run on the UI thread: it decodes cached covers into Slint images.
-fn playlist_items_for_ui(
-    items: &[netease::PlaylistDto],
-    covers: &[Option<PathBuf>],
-) -> Vec<PlaylistItem> {
+fn playlist_items_for_ui(items: &[netease::PlaylistDto]) -> Vec<PlaylistItem> {
     items
         .iter()
-        .enumerate()
-        .map(|(index, playlist)| {
-            let cover = covers
-                .get(index)
-                .and_then(|path| path.as_ref())
-                .and_then(|path| Image::load_from_path(path).ok());
-            PlaylistItem {
-                id: playlist.id.clone().into(),
-                title: playlist.name.clone().into(),
-                meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
-                cover: cover.unwrap_or_default(),
-                tint: color_for(&playlist.id),
-            }
+        .map(|playlist| PlaylistItem {
+            id: playlist.id.clone().into(),
+            title: playlist.name.clone().into(),
+            meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
+            cover: Image::default(),
+            tint: color_for(&playlist.id),
         })
         .collect()
 }
 
-fn track_items(items: &[netease::TrackDto]) -> Vec<TrackItem> {
-    items.iter().map(track_item).collect()
+#[derive(Clone, Copy)]
+enum PlaylistTarget {
+    Home,
+    Library,
+    Search,
+}
+
+fn playlist_model_for(ui: &AppWindow, target: PlaylistTarget) -> ModelRc<PlaylistItem> {
+    match target {
+        PlaylistTarget::Home => ui.get_playlists(),
+        PlaylistTarget::Library => ui.get_library_playlists(),
+        PlaylistTarget::Search => ui.get_search_playlists(),
+    }
+}
+
+async fn load_playlist_covers(
+    state: Arc<AppState>,
+    ui: Weak<AppWindow>,
+    target: PlaylistTarget,
+    playlists: Vec<netease::PlaylistDto>,
+    limit: usize,
+) {
+    let semaphore = Arc::new(Semaphore::new(8));
+    let mut tasks = JoinSet::new();
+    for (index, playlist) in playlists.into_iter().take(limit).enumerate() {
+        let endpoint = cover_url(&playlist.cover_url, 120);
+        if endpoint.is_empty() {
+            continue;
+        }
+        let state = state.clone();
+        let semaphore = semaphore.clone();
+        let playlist_id = playlist.id.clone();
+        tasks.spawn(async move {
+            let Ok(_permit) = semaphore.acquire_owned().await else {
+                return None;
+            };
+            tokio::time::timeout(Duration::from_secs(8), fetch_cover(&state, endpoint))
+                .await
+                .ok()
+                .flatten()
+                .map(|path| (index, playlist_id, path))
+        });
+    }
+    while let Some(joined) = tasks.join_next().await {
+        let Ok(Some((index, playlist_id, path))) = joined else {
+            continue;
+        };
+        update_ui(&ui, move |ui| {
+            let model = playlist_model_for(ui, target);
+            let Some(mut item) = model.row_data(index) else {
+                return;
+            };
+            if item.id.as_str() != playlist_id.as_str() {
+                return;
+            }
+            if let Ok(image) = Image::load_from_path(&path) {
+                item.cover = image;
+                model.set_row_data(index, item);
+            }
+        });
+    }
+}
+
+/// Must run on the UI thread: it decodes cached covers into Slint images.
+fn track_items_for_ui(items: &[netease::TrackDto]) -> Vec<TrackItem> {
+    items.iter().map(|track| track_item(track, None)).collect()
+}
+
+#[derive(Clone, Copy)]
+enum TrackTarget {
+    Recent,
+    Daily,
+    New,
+    LibraryRecent,
+    Search,
+    Detail,
+}
+
+fn track_model_for(ui: &AppWindow, target: TrackTarget) -> ModelRc<TrackItem> {
+    match target {
+        TrackTarget::Recent => ui.get_recent_tracks(),
+        TrackTarget::Daily => ui.get_daily_tracks(),
+        TrackTarget::New => ui.get_new_tracks(),
+        TrackTarget::LibraryRecent => ui.get_library_tracks(),
+        TrackTarget::Search => ui.get_search_tracks(),
+        TrackTarget::Detail => ui.get_detail_tracks(),
+    }
+}
+
+async fn load_track_covers(
+    state: Arc<AppState>,
+    ui: Weak<AppWindow>,
+    target: TrackTarget,
+    tracks: Vec<netease::TrackDto>,
+    limit: usize,
+) {
+    let semaphore = Arc::new(Semaphore::new(8));
+    let mut tasks = JoinSet::new();
+    for (index, track) in tracks.into_iter().take(limit).enumerate() {
+        let endpoint = cover_url(&track.cover_url, 80);
+        if endpoint.is_empty() {
+            continue;
+        }
+        let state = state.clone();
+        let semaphore = semaphore.clone();
+        let track_id = track.id.clone();
+        tasks.spawn(async move {
+            let Ok(_permit) = semaphore.acquire_owned().await else {
+                return None;
+            };
+            tokio::time::timeout(Duration::from_secs(8), fetch_cover(&state, endpoint))
+                .await
+                .ok()
+                .flatten()
+                .map(|path| (index, track_id, path))
+        });
+    }
+    while let Some(joined) = tasks.join_next().await {
+        let Ok(Some((index, track_id, path))) = joined else {
+            continue;
+        };
+        update_ui(&ui, move |ui| {
+            let model = track_model_for(ui, target);
+            let Some(mut item) = model.row_data(index) else {
+                return;
+            };
+            if item.id.as_str() != track_id.as_str() {
+                return;
+            }
+            if let Ok(image) = Image::load_from_path(&path) {
+                item.cover = image;
+                model.set_row_data(index, item);
+            }
+        });
+    }
 }
 
 fn update_ui<F: FnOnce(&AppWindow) + Send + 'static>(ui: &Weak<AppWindow>, f: F) {
@@ -371,63 +499,17 @@ async fn fetch_cover(state: &AppState, url: String) -> Option<PathBuf> {
         return None;
     };
     let path = base.with_extension(extension);
-    fs::write(&path, &bytes).ok()?;
+    // Multiple lists can request the same cover at once. Write atomically so a
+    // reader never sees a partially written cache file.
+    let temporary = base.with_extension(format!("{extension}.{}.tmp", rand::random::<u64>()));
+    if fs::write(&temporary, &bytes).is_err() {
+        return None;
+    }
+    if fs::rename(&temporary, &path).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return None;
+    }
     Some(path)
-}
-
-async fn fetch_covers(
-    state: &AppState,
-    urls: Vec<String>,
-    max_wait: Duration,
-) -> Vec<Option<PathBuf>> {
-    let mut result = vec![None; urls.len()];
-    let semaphore = Arc::new(Semaphore::new(6));
-    let mut tasks = JoinSet::new();
-    for (index, url) in urls.into_iter().enumerate() {
-        if url.is_empty() {
-            continue;
-        }
-        let state = state.clone();
-        let semaphore = semaphore.clone();
-        tasks.spawn(async move {
-            let Ok(_permit) = semaphore.acquire_owned().await else {
-                return (index, None);
-            };
-            (index, fetch_cover(&state, url).await)
-        });
-    }
-    let deadline = tokio::time::Instant::now() + max_wait;
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            tasks.abort_all();
-            break;
-        }
-        match tokio::time::timeout(deadline - now, tasks.join_next()).await {
-            Ok(Some(Ok((index, path)))) => result[index] = path,
-            Ok(Some(Err(_))) => {}
-            Ok(None) => break,
-            Err(_) => {
-                tasks.abort_all();
-                break;
-            }
-        }
-    }
-    result
-}
-
-fn apply_playlist_models(
-    ui: &AppWindow,
-    items: &[netease::PlaylistDto],
-    covers: &[Option<PathBuf>],
-    target: &str,
-) {
-    let model = ModelRc::from(Rc::new(VecModel::from(playlist_items_for_ui(items, covers))));
-    match target {
-        "library" => ui.set_library_playlists(model),
-        "search" => ui.set_search_playlists(model),
-        _ => ui.set_playlists(model),
-    }
 }
 
 fn load_saved_player() -> Option<SavedPlayer> {
@@ -493,6 +575,7 @@ fn start_track(
     let duration = track.duration_ms as f32 / 1000.0;
     let title = track.name.clone();
     let artist = track.artist.clone();
+    let album = track.album.clone();
     let requested_quality = prefs
         .lock()
         .ok()
@@ -504,12 +587,18 @@ fn start_track(
         format!("{} · {}", quality_label(&requested_quality), track.quality)
     };
     let cover = color_for(&track.id);
+    let track_id = track.id.clone();
     update_ui(&ui, move |ui| {
+        ui.set_current_id(track_id.clone().into());
         ui.set_current_title(title.into());
         ui.set_current_artist(artist.into());
+        ui.set_current_album(album.into());
         ui.set_current_quality(quality_text.into());
+        ui.set_position_text("00:00".into());
+        ui.set_duration_text(format_clock(duration).into());
         ui.set_current_cover(cover);
         ui.set_current_cover_image(Image::default());
+        ui.set_current_backdrop(Image::default());
         ui.set_duration(duration);
         ui.set_progress(0.0);
         ui.set_playing(true);
@@ -583,10 +672,22 @@ fn start_track(
         }
         let _ = audio.tx.send(AudioCmd::Load(bytes, duration));
         let id = track.id.clone();
-        let cover_endpoint = cover_url(&track.cover_url, 96);
-        let (lyric_result, cover_path) = tokio::join!(
+        let cover_endpoint = cover_url(&track.cover_url, 500);
+        let backdrop_endpoint = cover_url(&track.cover_url, 24);
+        let (lyric_result, cover_path, backdrop_path) = tokio::join!(
             netease::lyric(&state, id),
-            fetch_cover(&state, cover_endpoint),
+            async {
+                tokio::time::timeout(Duration::from_secs(6), fetch_cover(&state, cover_endpoint))
+                    .await
+                    .ok()
+                    .flatten()
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(6), fetch_cover(&state, backdrop_endpoint))
+                    .await
+                    .ok()
+                    .flatten()
+            },
         );
         if generation.load(Ordering::Relaxed) != request {
             return;
@@ -610,10 +711,17 @@ fn start_track(
                 ui.set_lyric_scroll_y(0.0);
             });
         }
-        if let Some(path) = cover_path {
+        if cover_path.is_some() || backdrop_path.is_some() {
             update_ui(&ui, move |ui| {
-                if let Ok(image) = Image::load_from_path(&path) {
-                    ui.set_current_cover_image(image);
+                if let Some(path) = cover_path {
+                    if let Ok(image) = Image::load_from_path(&path) {
+                        ui.set_current_cover_image(image);
+                    }
+                }
+                if let Some(path) = backdrop_path {
+                    if let Ok(image) = Image::load_from_path(&path) {
+                        ui.set_current_backdrop(image);
+                    }
                 }
             });
         }
@@ -675,35 +783,46 @@ fn load_home(
                     catalog.new_songs = home.new_songs.clone();
                     catalog.playlists = home.recommended.clone();
                 }
-                let recent = track_items(&home.recent);
-                let daily = track_items(&home.daily);
-                let new_songs = track_items(&home.new_songs);
+                let recent_covers = home.recent.clone();
+                let daily_covers = home.daily.clone();
+                let new_covers = home.new_songs.clone();
                 let recommended = home.recommended.clone();
                 let recommended_count = recommended.len();
                 update_ui(&ui, move |ui| {
-                    ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(recent))));
-                    ui.set_daily_tracks(ModelRc::from(Rc::new(VecModel::from(daily))));
-                    ui.set_new_tracks(ModelRc::from(Rc::new(VecModel::from(new_songs))));
+                    ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        track_items_for_ui(&home.recent),
+                    ))));
+                    ui.set_daily_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        track_items_for_ui(&home.daily),
+                    ))));
+                    ui.set_new_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        track_items_for_ui(&home.new_songs),
+                    ))));
                     ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
-                        playlist_items_for_ui(&home.recommended, &[]),
+                        playlist_items_for_ui(&home.recommended),
                     ))));
                     ui.set_status_text(format!("已加载 {recommended_count} 个推荐歌单").into());
                 });
-                let cover_state = state.clone();
-                let cover_ui = ui.clone();
-                let urls = recommended
-                    .iter()
-                    .map(|playlist| cover_url(&playlist.cover_url, 120))
-                    .collect::<Vec<_>>();
-                tokio::spawn(async move {
-                    let covers =
-                        fetch_covers(&cover_state, urls, Duration::from_secs(4)).await;
-                    if covers.iter().any(|cover| cover.is_some()) {
-                        update_ui(&cover_ui, move |ui| {
-                            apply_playlist_models(ui, &recommended, &covers, "home");
-                        });
-                    }
-                });
+                for (target, tracks, limit) in [
+                    (TrackTarget::Recent, recent_covers, 80usize),
+                    (TrackTarget::Daily, daily_covers, 80),
+                    (TrackTarget::New, new_covers, 40),
+                ] {
+                    tokio::spawn(load_track_covers(
+                        state.clone(),
+                        ui.clone(),
+                        target,
+                        tracks,
+                        limit,
+                    ));
+                }
+                tokio::spawn(load_playlist_covers(
+                    state.clone(),
+                    ui.clone(),
+                    PlaylistTarget::Home,
+                    recommended,
+                    12,
+                ));
             }
             Err(error) => update_ui(&ui, move |ui| ui.set_status_text(error.into())),
         }
@@ -723,32 +842,32 @@ fn load_library(
                     catalog.library_playlists = library.playlists.clone();
                     catalog.library_recent = library.recent.clone();
                 }
-                let recent = track_items(&library.recent);
+                let recent_covers = library.recent.clone();
                 let playlist_count = library.playlists.len();
                 let all_playlists = library.playlists.clone();
                 update_ui(&ui, move |ui| {
                     ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(
-                        playlist_items_for_ui(&library.playlists, &[]),
+                        playlist_items_for_ui(&library.playlists),
                     ))));
-                    ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(recent))));
+                    ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        track_items_for_ui(&library.recent),
+                    ))));
                     ui.set_status_text(format!("资料库：{playlist_count} 个歌单").into());
                 });
-                let cover_state = state.clone();
-                let cover_ui = ui.clone();
-                let urls = all_playlists
-                    .iter()
-                    .take(30)
-                    .map(|playlist| cover_url(&playlist.cover_url, 120))
-                    .collect::<Vec<_>>();
-                tokio::spawn(async move {
-                    let covers =
-                        fetch_covers(&cover_state, urls, Duration::from_secs(4)).await;
-                    if covers.iter().any(|cover| cover.is_some()) {
-                        update_ui(&cover_ui, move |ui| {
-                            apply_playlist_models(ui, &all_playlists, &covers, "library");
-                        });
-                    }
-                });
+                tokio::spawn(load_track_covers(
+                    state.clone(),
+                    ui.clone(),
+                    TrackTarget::LibraryRecent,
+                    recent_covers,
+                    80,
+                ));
+                tokio::spawn(load_playlist_covers(
+                    state.clone(),
+                    ui.clone(),
+                    PlaylistTarget::Library,
+                    all_playlists,
+                    200,
+                ));
             }
             Err(error) => update_ui(&ui, move |ui| ui.set_status_text(error.into())),
         }
@@ -822,22 +941,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             format!("{} · {}", quality_label(&snapshot.quality), track.quality)
         };
+        ui.set_current_id(track.id.clone().into());
         ui.set_current_title(track.name.clone().into());
         ui.set_current_artist(track.artist.clone().into());
+        ui.set_current_album(track.album.clone().into());
         ui.set_current_quality(quality_text.into());
+        ui.set_position_text("00:00".into());
+        ui.set_duration_text(format_duration(track.duration_ms).into());
         ui.set_current_cover(color_for(&track.id));
         ui.set_duration(track.duration_ms as f32 / 1000.0);
         ui.set_progress(0.0);
         ui.set_playing(false);
-        let cover_endpoint = cover_url(&track.cover_url, 96);
-        if !cover_endpoint.is_empty() {
+        let cover_endpoint = cover_url(&track.cover_url, 500);
+        let backdrop_endpoint = cover_url(&track.cover_url, 24);
+        if !cover_endpoint.is_empty() || !backdrop_endpoint.is_empty() {
             let cover_state = state.clone();
             let cover_ui = weak.clone();
             runtime.spawn(async move {
-                if let Some(path) = fetch_cover(&cover_state, cover_endpoint).await {
+                let (cover_path, backdrop_path) = tokio::join!(
+                    fetch_cover(&cover_state, cover_endpoint),
+                    fetch_cover(&cover_state, backdrop_endpoint),
+                );
+                if cover_path.is_some() || backdrop_path.is_some() {
                     update_ui(&cover_ui, move |ui| {
-                        if let Ok(image) = Image::load_from_path(&path) {
-                            ui.set_current_cover_image(image);
+                        if let Some(path) = cover_path {
+                            if let Ok(image) = Image::load_from_path(&path) {
+                                ui.set_current_cover_image(image);
+                            }
+                        }
+                        if let Some(path) = backdrop_path {
+                            if let Ok(image) = Image::load_from_path(&path) {
+                                ui.set_current_backdrop(image);
+                            }
                         }
                     });
                 }
@@ -1017,41 +1152,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             catalog.search_playlists = data.playlists.clone();
                         }
                         let cover_items = data.playlists.clone();
+                        let song_covers = data.songs.clone();
                         update_ui(&weak, move |ui| {
                             ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
-                                track_items(&data.songs),
+                                track_items_for_ui(&data.songs),
                             ))));
                             ui.set_search_playlists(ModelRc::from(Rc::new(VecModel::from(
-                                playlist_items_for_ui(&data.playlists, &[]),
+                                playlist_items_for_ui(&data.playlists),
                             ))));
                             ui.set_status_text(
                                 format!("搜索到 {} 首歌曲", data.songs.len()).into(),
                             );
                         });
-                        let cover_state = state.clone();
-                        let cover_ui = weak.clone();
-                        let cover_generation = search_generation.clone();
-                        let urls = cover_items
-                            .iter()
-                            .map(|playlist| cover_url(&playlist.cover_url, 120))
-                            .collect::<Vec<_>>();
-                        tokio::spawn(async move {
-                            let covers =
-                                fetch_covers(&cover_state, urls, Duration::from_secs(3)).await;
-                            if cover_generation.load(Ordering::Relaxed) != request {
-                                return;
-                            }
-                            if covers.iter().any(|cover| cover.is_some()) {
-                                update_ui(&cover_ui, move |ui| {
-                                    apply_playlist_models(
-                                        ui,
-                                        &cover_items,
-                                        &covers,
-                                        "search",
-                                    );
-                                });
-                            }
-                        });
+                        tokio::spawn(load_track_covers(
+                            state.clone(),
+                            weak.clone(),
+                            TrackTarget::Search,
+                            song_covers,
+                            40,
+                        ));
+                        tokio::spawn(load_playlist_covers(
+                            state.clone(),
+                            weak.clone(),
+                            PlaylistTarget::Search,
+                            cover_items,
+                            12,
+                        ));
                     }
                     Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
                 }
@@ -1076,12 +1202,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Ok(mut catalog) = catalog.lock() {
                             catalog.detail = playlist.tracks.clone();
                         }
-                        let tracks = track_items(&playlist.tracks);
+                        let track_covers = playlist.tracks.clone();
                         let title = playlist.name.clone();
                         let meta = format!("{} · {} 首", playlist.creator, playlist.track_count);
                         let description = playlist.description.clone();
                         let cover_tint = color_for(&playlist.id);
                         let cover_endpoint = cover_url(&playlist.cover_url, 200);
+                        let detail_playlist = playlist.clone();
                         update_ui(&weak, move |ui| {
                             ui.set_page("detail".into());
                             ui.set_detail_title(title.into());
@@ -1089,8 +1216,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_detail_description(description.into());
                             ui.set_detail_cover_tint(cover_tint);
                             ui.set_detail_cover_image(Image::default());
-                            ui.set_detail_tracks(ModelRc::from(Rc::new(VecModel::from(tracks))));
+                            ui.set_detail_tracks(ModelRc::from(Rc::new(VecModel::from(
+                                track_items_for_ui(&detail_playlist.tracks),
+                            ))));
                         });
+                        tokio::spawn(load_track_covers(
+                            state.clone(),
+                            weak.clone(),
+                            TrackTarget::Detail,
+                            track_covers,
+                            600,
+                        ));
                         if !cover_endpoint.is_empty() {
                             let cover_state = state.clone();
                             let cover_ui = weak.clone();
@@ -1220,6 +1356,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let audio = audio.clone();
+        let weak = weak.clone();
+        ui.on_seek_lyric(move |time| {
+            let _ = audio.tx.send(AudioCmd::Seek(time));
+            if let Some(ui) = weak.upgrade() {
+                ui.set_progress(time);
+                ui.set_lyric_follow(true);
+            }
+        });
+    }
+
+    {
+        let audio = audio.clone();
         let prefs = prefs.clone();
         ui.on_volume_changed(move |value| {
             let _ = audio.tx.send(AudioCmd::Volume(value));
@@ -1321,6 +1469,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = weak.clone();
         ui.on_open_player(move || {
             if let Some(ui) = weak.upgrade() {
+                if ui.get_current_title().is_empty() {
+                    ui.set_status_text("还没有正在播放的歌曲".into());
+                    return;
+                }
                 ui.set_player_open(true);
                 if ui.get_lyric_follow() {
                     ui.set_lyric_scroll_y(ui.get_lyric_target_y());
@@ -1359,6 +1511,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ui.set_progress(snapshot.position.min(duration));
+            ui.set_position_text(format_clock(snapshot.position).into());
             if snapshot.loaded || snapshot.error.is_some() {
                 ui.set_loading(false);
             }
