@@ -808,7 +808,7 @@ export component AppWindow inherits Window {
                             background: @linear-gradient(135deg, #7e838d, #3c4149);
                             Text { text: root.account-initial; color: #ffffff; font-size: 10px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
                         }
-                        Text { text: root.logged-in ? root.account-name : "登录"; color: #c7c7cc; font-size: 11px; vertical-alignment: center; overflow: elide; }
+                        Text { horizontal-stretch: 1; text: root.logged-in ? root.account-name : "登录"; color: #c7c7cc; font-size: 11px; vertical-alignment: center; overflow: elide; }
                     }
                     account-tap := TouchArea {
                         clicked => {
@@ -880,6 +880,7 @@ export component AppWindow inherits Window {
                 border-color: #ffffff0d;
                 VerticalLayout {
                     padding-top: 16px;
+                    padding-bottom: 12px;
                     padding-left: 16px;
                     padding-right: 16px;
                     spacing: 3px;
@@ -1367,10 +1368,13 @@ export component AppWindow inherits Window {
                             Rectangle { horizontal-stretch: 1; }
                         }
 
-                        Rectangle {
-                            width: 980px;
-                            background: #1b1c1e;
-                            border-radius: 24px;
+                        HorizontalLayout {
+                            spacing: 0px;
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: 980px;
+                                background: #1b1c1e;
+                                border-radius: 24px;
                             border-width: 1px;
                             border-color: #ffffff10;
                             VerticalLayout {
@@ -1445,7 +1449,9 @@ export component AppWindow inherits Window {
                                 }
 
                                 Text { text: "Decro 0.2.0 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                }
                             }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                     }
                 }
