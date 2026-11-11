@@ -514,6 +514,8 @@ fn start_track(
         ui.set_progress(0.0);
         ui.set_playing(true);
         ui.set_loading(true);
+        ui.set_lyric_follow(true);
+        ui.set_lyric_scroll_y(0.0);
         ui.set_status_text("正在加载音源…".into());
     });
     runtime.spawn(async move {
@@ -604,6 +606,8 @@ fn start_track(
                     .collect::<Vec<_>>();
                 ui.set_lyrics(ModelRc::from(Rc::new(VecModel::from(items))));
                 ui.set_lyric_index(0);
+                ui.set_lyric_follow(true);
+                ui.set_lyric_scroll_y(0.0);
             });
         }
         if let Some(path) = cover_path {
@@ -1318,6 +1322,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_open_player(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_player_open(true);
+                if ui.get_lyric_follow() {
+                    ui.set_lyric_scroll_y(ui.get_lyric_target_y());
+                }
             }
         });
     }
@@ -1364,7 +1371,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         index = i;
                     }
                 }
+                let previous = ui.get_lyric_index();
                 ui.set_lyric_index(index as i32);
+                if index as i32 != previous && ui.get_lyric_follow() {
+                    ui.set_lyric_scroll_y(ui.get_lyric_target_y());
+                }
             }
             if snapshot.ended {
                 if let Ok(mut snap) = audio.snapshot.lock() {

@@ -157,6 +157,13 @@ export component AppWindow inherits Window {
     in property <bool> player-open;
     in property <[LyricItem]> lyrics;
     in property <int> lyric-index;
+    in-out property <bool> lyric-follow: true;
+    in-out property <length> lyric-scroll-y;
+    private property <length> lyric-view-height: 500px;
+    out property <length> lyric-target-y: max(0px, min(
+        root.lyric-index * 38px - (root.lyric-view-height - 38px) / 2,
+        root.lyrics.length * 38px - root.lyric-view-height
+    ));
 
     callback refresh-qr();
     callback import-cookie(string);
@@ -450,7 +457,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Text { text: "Decro Slint 0.1.1 · 原生 UI · 软件渲染 · 便携数据"; color: #6f6f75; font-size: 11px; }
+                Text { text: "Decro Slint 0.1.2 · 原生 UI · 软件渲染 · 便携数据"; color: #6f6f75; font-size: 11px; }
             }
         }
 
@@ -526,19 +533,29 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 10px;
                     Button { text: "← 收起"; clicked => { root.close-player(); } }
-                    Text { text: root.current-title; color: #fff; font-size: 26px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                    Text { horizontal-stretch: 1; text: root.current-title; color: #fff; font-size: 26px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.lyric-follow ? "滚轮或拖动查看歌词" : "已暂停自动跟随";
+                        color: #85858a;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    if !root.lyric-follow : Button {
+                        text: "回到当前";
+                        clicked => {
+                            root.lyric-follow = true;
+                            root.lyric-scroll-y = root.lyric-target-y;
+                        }
+                    }
                 }
                 Text { text: root.current-artist + " · " + root.current-quality; color: #8d8d93; font-size: 13px; }
                 Flickable {
-                    height: 500px;
-                    interactive: false;
+                    height: root.lyric-view-height;
                     content-width: self.width;
                     content-height: root.lyrics.length * 38px;
-                    content-y: max(0px, min(
-                        root.lyric-index * 38px - (self.height - 38px) / 2,
-                        root.lyrics.length * 38px - self.height
-                    ));
-                    animate content-y { duration: 260ms; easing: ease-out; }
+                    content-y <=> root.lyric-scroll-y;
+                    flicked => { root.lyric-follow = false; }
                     for line[index] in root.lyrics : Rectangle {
                         y: index * 38px;
                         width: parent.width;
