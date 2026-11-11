@@ -29,7 +29,8 @@ export struct LyricItem {
 
 component Glyph inherits Image {
     in property <length> glyph-size: 18px;
-    in property <color> tint: #8e8e93;
+    in-out property <color> tint: #8e8e93;
+    animate tint { duration: 160ms; }
     width: root.glyph-size;
     height: root.glyph-size;
     colorize: root.tint;
@@ -156,6 +157,35 @@ component SettingsToggleRow inherits Rectangle {
             toggled(value) => { root.toggled(value); }
         }
     }
+}
+
+component FlyingControl inherits Rectangle {
+    in property <length> tx;
+    in property <length> ty;
+    in property <length> tw: 40px;
+    in property <length> th: 40px;
+    in property <image> icon;
+    in-out property <length> icon-size: 22px;
+    in-out property <color> tint: #ffffff;
+    in property <color> fill: transparent;
+    in property <length> corner: 20px;
+    x: root.tx;
+    y: root.ty;
+    width: root.tw;
+    height: root.th;
+    background: root.fill;
+    border-radius: root.corner;
+    clip: true;
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        glyph-size: root.icon-size;
+        tint: root.tint;
+    }
+    TouchArea { }
+    animate x, y, width, height, border-radius, icon-size { duration: 380ms; easing: ease-out; }
+    animate background { duration: 380ms; easing: ease-out; }
 }
 
 component RoundIconButton inherits Rectangle {
@@ -563,32 +593,52 @@ component TextField inherits Rectangle {
 component SeekBar inherits Rectangle {
     in property <float> value;
     in property <float> maximum;
+    in property <bool> playing;
+    in property <bool> low-power;
     callback seek(float);
     height: 26px;
     property <length> fill-width: root.maximum > 0
         ? min(root.width, root.width * max(0, min(1, root.value / root.maximum)))
         : 0px;
+    // Unplayed hairline.
     Rectangle {
-        x: 0;
+        x: root.fill-width;
         y: (parent.height - 3px) / 2;
-        width: 100%;
+        width: max(0px, root.width - root.fill-width);
         height: 3px;
         border-radius: 2px;
-        background: #ffffff3d;
+        background: #ffffff75;
     }
+    // Played area: animated sine wave while playing, flat line when paused or
+    // in performance mode.
     Rectangle {
         x: 0;
-        y: (parent.height - 3px) / 2;
+        y: (parent.height - 16px) / 2;
         width: root.fill-width;
-        height: 3px;
-        border-radius: 2px;
-        background: #ffffff;
+        height: 16px;
+        clip: true;
+        if root.playing && !root.low-power : Image {
+            x: -(mod(animation-tick(), 1250ms) / 1250ms) * 32px;
+            y: 0;
+            width: 3840px;
+            height: 16px;
+            source: @image-url("../assets/wave.svg");
+            image-fit: fill;
+            opacity: 0.86;
+        }
+        if !root.playing || root.low-power : Rectangle {
+            y: (parent.height - 3px) / 2;
+            width: 100%;
+            height: 3px;
+            border-radius: 2px;
+            background: #ffffffdb;
+        }
     }
     Rectangle {
         x: root.fill-width - 2px;
-        y: (parent.height - 18px) / 2;
+        y: (parent.height - 34px) / 2;
         width: 4px;
-        height: 18px;
+        height: 34px;
         border-radius: 2px;
         background: #ffffff;
         visible: root.maximum > 0;
@@ -737,13 +787,24 @@ export component AppWindow inherits Window {
     in-out property <bool> player-open;
     in-out property <bool> player-visible;
     in-out property <bool> cover-flying;
+    in-out property <bool> controls-ready: true;
     in property <[TrackItem]> queue-tracks;
     in property <int> queue-index;
     in-out property <bool> queue-open;
     in-out property <bool> repaint-nudge;
     private property <length> player-cover-size: 360px;
-    private property <length> player-cover-fly-x: 68px + ((root.width - 136px) * 0.4 - root.player-cover-size) / 2;
-    private property <length> player-cover-fly-y: root.titlebar-height + 60px + (root.height - root.titlebar-height - 196px - root.player-cover-size) / 2;
+    in-out property <length> player-cover-target-x: 68px + ((root.width - 136px) * 0.4 - 360px) / 2;
+    in-out property <length> player-cover-target-y: root.titlebar-height + 60px + (root.height - root.titlebar-height - 196px - 360px) / 2;
+    in-out property <length> player-cover-target-w: 360px;
+    in-out property <length> player-cover-target-h: 360px;
+    in-out property <length> player-play-target-x: (root.width - 96px) / 2;
+    in-out property <length> player-play-target-y: root.height - 118px;
+    in-out property <length> player-play-target-w: 96px;
+    in-out property <length> player-play-target-h: 64px;
+    in-out property <length> player-next-target-x: (root.width + 96px) / 2 + 22px;
+    in-out property <length> player-next-target-y: root.height - 122px;
+    in-out property <length> player-next-target-w: 62px;
+    in-out property <length> player-next-target-h: 62px;
     in-out property <bool> lyrics-mode;
     in property <[LyricItem]> lyrics;
     in property <int> lyric-index;
@@ -796,21 +857,17 @@ export component AppWindow inherits Window {
 
     // Page transition is expressed with a soft opacity fade.
     in-out property <float> page-opacity: 1;
+    in property <image> ambient-background;
+    in-out property <bool> workspace-hidden;
 
-    // Ambient wash behind the app shell.
-    Rectangle {
-        x: -220px;
-        y: -260px;
-        width: 920px;
-        height: 920px;
-        background: @radial-gradient(circle, #c9202716 0%, #c9202700 64%);
-    }
-    Rectangle {
-        x: root.width - 760px;
-        y: root.height - 760px;
-        width: 900px;
-        height: 900px;
-        background: @radial-gradient(circle, #6b3fa012 0%, #6b3fa000 64%);
+    // Ambient wash, pre-rendered in Rust so scrolling does not evaluate
+    // two large radial gradients every frame.
+    Image {
+        visible: !root.workspace-hidden;
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+        source: root.ambient-background;
+        image-fit: fill;
     }
 
     VerticalLayout {
@@ -970,6 +1027,7 @@ export component AppWindow inherits Window {
 
         // ── Workspace ───────────────────────────────────────────────────
         HorizontalLayout {
+            visible: !root.workspace-hidden;
             vertical-stretch: 1;
             spacing: 0px;
 
@@ -1708,7 +1766,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.3.2 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.3.3 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -1738,7 +1796,7 @@ export component AppWindow inherits Window {
             spacing: 14px;
             cross-axis-alignment: center;
 
-            Rectangle {
+            dock-cover := Rectangle {
                 visible: !root.cover-flying;
                 width: 62px;
                 height: 62px;
@@ -1786,14 +1844,14 @@ export component AppWindow inherits Window {
                 TouchArea { clicked => { root.open-player(); } }
             }
 
-            RoundIconButton {
+            dock-play := RoundIconButton {
                 icon: root.loading ? @image-url("../assets/icons/more.svg") : (root.playing ? @image-url("../assets/icons/pause-fill.svg") : @image-url("../assets/icons/play-fill.svg"));
                 icon-size: 22px;
                 button-size: 40px;
                 background-color: transparent;
                 clicked => { root.toggle-play(); }
             }
-            RoundIconButton {
+            dock-next := RoundIconButton {
                 icon: @image-url("../assets/icons/next.svg");
                 icon-size: 20px;
                 button-size: 40px;
@@ -1843,32 +1901,6 @@ export component AppWindow inherits Window {
             vertical-alignment: center;
             overflow: elide;
         }
-    }
-
-    // ── Flying cover between the dock and the player ─────────────────────
-    Rectangle {
-        visible: root.cover-flying;
-        z: 45;
-        x: root.player-open ? root.player-cover-fly-x : root.sidebar-width + 36px;
-        y: root.player-open ? root.player-cover-fly-y : root.height - 90px;
-        width: root.player-open ? root.player-cover-size : 62px;
-        height: root.player-open ? root.player-cover-size : 62px;
-        border-radius: root.player-open ? 24px : 16px;
-        background: root.current-cover;
-        clip: true;
-        drop-shadow-color: #00000066;
-        drop-shadow-blur: 28px;
-        drop-shadow-offset-y: 10px;
-        Image { width: 100%; height: 100%; source: root.current-cover-image; image-fit: cover; image-rendering: smooth; }
-        if root.current-cover-image.width == 0 : Text {
-            x: 0; y: 0; width: 100%; height: 100%;
-            text: "♪";
-            color: #ffffff88;
-            font-size: root.player-open ? 60px : 24px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-        animate x, y, width, height, border-radius { duration: 380ms; easing: ease-out; }
     }
 
     // ── Playlist dialog ──────────────────────────────────────────────────
@@ -2037,14 +2069,13 @@ export component AppWindow inherits Window {
 
         Image {
             visible: root.cover-accent && !root.low-power;
-            x: -root.width * 0.08;
-            y: -root.height * 0.08;
-            width: root.width * 1.16;
-            height: root.height * 1.16;
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
             source: root.current-backdrop;
             image-fit: cover;
             image-rendering: smooth;
-            opacity: 0.92;
         }
         Rectangle {
             width: 100%;
@@ -2105,7 +2136,21 @@ export component AppWindow inherits Window {
                     alignment: center;
                     cross-axis-alignment: center;
                     spacing: 14px;
-                    Rectangle {
+                    player-cover := Rectangle {
+                        init => {
+                            if (self.absolute-position.x != 0px || self.absolute-position.y != 0px) {
+                                root.player-cover-target-x = self.absolute-position.x;
+                                root.player-cover-target-y = self.absolute-position.y;
+                            }
+                            root.player-cover-target-w = self.width;
+                            root.player-cover-target-h = self.height;
+                        }
+                        changed absolute-position => {
+                            root.player-cover-target-x = self.absolute-position.x;
+                            root.player-cover-target-y = self.absolute-position.y;
+                        }
+                        changed width => { root.player-cover-target-w = self.width; }
+                        changed height => { root.player-cover-target-h = self.height; }
                         visible: !root.cover-flying;
                         width: root.player-cover-size;
                         height: root.player-cover-size;
@@ -2287,6 +2332,8 @@ export component AppWindow inherits Window {
                 SeekBar {
                     value: root.progress;
                     maximum: root.duration;
+                    playing: root.playing;
+                    low-power: root.low-power;
                     seek(value) => { root.seek(value); }
                 }
                 HorizontalLayout {
@@ -2328,7 +2375,23 @@ export component AppWindow inherits Window {
                             button-size: 62px;
                             clicked => { root.prev(); }
                         }
-                        Rectangle {
+                        player-play := Rectangle {
+                            init => {
+                                if (self.absolute-position.x != 0px || self.absolute-position.y != 0px) {
+                                    root.player-play-target-x = self.absolute-position.x;
+                                    root.player-play-target-y = self.absolute-position.y;
+                                }
+                                root.player-play-target-w = self.width;
+                                root.player-play-target-h = self.height;
+                            }
+                            changed absolute-position => {
+                                root.player-play-target-x = self.absolute-position.x;
+                                root.player-play-target-y = self.absolute-position.y;
+                            }
+                            changed width => { root.player-play-target-w = self.width; }
+                            changed height => { root.player-play-target-h = self.height; }
+                            opacity: root.controls-ready ? 1 : 0;
+                            animate opacity { duration: 80ms; }
                             width: 96px;
                             height: 64px;
                             border-radius: 23px;
@@ -2346,11 +2409,31 @@ export component AppWindow inherits Window {
                             }
                             play-tap := TouchArea { clicked => { root.toggle-play(); } }
                         }
-                        RoundIconButton {
-                            icon: @image-url("../assets/icons/next.svg");
-                            icon-size: 22px;
-                            button-size: 62px;
-                            clicked => { root.next(); }
+                        player-next := Rectangle {
+                            init => {
+                                if (self.absolute-position.x != 0px || self.absolute-position.y != 0px) {
+                                    root.player-next-target-x = self.absolute-position.x;
+                                    root.player-next-target-y = self.absolute-position.y;
+                                }
+                                root.player-next-target-w = self.width;
+                                root.player-next-target-h = self.height;
+                            }
+                            changed absolute-position => {
+                                root.player-next-target-x = self.absolute-position.x;
+                                root.player-next-target-y = self.absolute-position.y;
+                            }
+                            changed width => { root.player-next-target-w = self.width; }
+                            changed height => { root.player-next-target-h = self.height; }
+                            width: 62px;
+                            height: 62px;
+                            opacity: root.controls-ready ? 1 : 0;
+                            animate opacity { duration: 80ms; }
+                            RoundIconButton {
+                                icon: @image-url("../assets/icons/next.svg");
+                                icon-size: 22px;
+                                button-size: 62px;
+                                clicked => { root.next(); }
+                            }
                         }
                     }
                     Rectangle { horizontal-stretch: 1; }
@@ -2452,4 +2535,59 @@ export component AppWindow inherits Window {
             }
         }
     }
+
+    // ── Flying cover between the dock and the player ─────────────────────
+    Rectangle {
+        visible: root.cover-flying;
+        z: 45;
+        x: root.player-open ? root.player-cover-target-x : dock-cover.absolute-position.x;
+        y: root.player-open ? root.player-cover-target-y : dock-cover.absolute-position.y;
+        width: root.player-open ? root.player-cover-target-w : dock-cover.width;
+        height: root.player-open ? root.player-cover-target-h : dock-cover.height;
+        border-radius: root.player-open ? 24px : 16px;
+        background: root.current-cover;
+        clip: true;
+        drop-shadow-color: #00000066;
+        drop-shadow-blur: 28px;
+        drop-shadow-offset-y: 10px;
+        Image { width: 100%; height: 100%; source: root.current-cover-image; image-fit: cover; image-rendering: smooth; }
+        if root.current-cover-image.width == 0 : Text {
+            x: 0; y: 0; width: 100%; height: 100%;
+            text: "♪";
+            color: #ffffff88;
+            font-size: root.player-open ? 60px : 24px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        animate x, y, width, height, border-radius { duration: 380ms; easing: ease-out; }
+    }
+
+    // Play / next morph between the dock and the full player.
+    FlyingControl {
+        visible: root.cover-flying;
+        z: 46;
+        tx: root.player-open ? root.player-play-target-x : dock-play.absolute-position.x;
+        ty: root.player-open ? root.player-play-target-y : dock-play.absolute-position.y;
+        tw: root.player-open ? root.player-play-target-w : dock-play.width;
+        th: root.player-open ? root.player-play-target-h : dock-play.height;
+        icon: root.loading ? @image-url("../assets/icons/more.svg") : (root.playing ? @image-url("../assets/icons/pause-fill.svg") : @image-url("../assets/icons/play-fill.svg"));
+        icon-size: root.player-open ? 24px : 22px;
+        tint: root.player-open ? #111111 : #ffffff;
+        fill: root.player-open ? #f5f4f2 : transparent;
+        corner: root.player-open ? 23px : 20px;
+    }
+    FlyingControl {
+        visible: root.cover-flying;
+        z: 46;
+        tx: root.player-open ? root.player-next-target-x : dock-next.absolute-position.x;
+        ty: root.player-open ? root.player-next-target-y : dock-next.absolute-position.y;
+        tw: root.player-open ? root.player-next-target-w : dock-next.width;
+        th: root.player-open ? root.player-next-target-h : dock-next.height;
+        icon: @image-url("../assets/icons/next.svg");
+        icon-size: root.player-open ? 22px : 20px;
+        tint: #ffffff;
+        fill: root.player-open ? #ffffff21 : transparent;
+        corner: root.player-open ? 31px : 20px;
+    }
+
 }

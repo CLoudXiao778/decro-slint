@@ -171,6 +171,35 @@ fn spawn_audio() -> AudioHandle {
     AudioHandle { tx, snapshot }
 }
 
+fn ambient_background() -> Image {
+    // Pre-composite the two Tauri-style ambient glows over the black shell.
+    // Drawing one opaque image is much cheaper for the software renderer than
+    // evaluating two full-window radial gradients on every scrolled frame.
+    let width = 1200u32;
+    let height = 760u32;
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    let pixels = buffer.make_mut_bytes();
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 - 240.0;
+            let dy = y as f32 - 200.0;
+            let red = (1.0 - (dx * dx + dy * dy).sqrt() / 560.0).max(0.0);
+            let dx = x as f32 - 890.0;
+            let dy = y as f32 - 450.0;
+            let purple = (1.0 - (dx * dx + dy * dy).sqrt() / 520.0).max(0.0);
+            let r = 201.0 * 0.086 * red + 107.0 * 0.070 * purple;
+            let g = 32.0 * 0.086 * red + 63.0 * 0.070 * purple;
+            let b = 39.0 * 0.086 * red + 160.0 * 0.070 * purple;
+            let index = ((y * width + x) * 4) as usize;
+            pixels[index] = r.min(255.0) as u8;
+            pixels[index + 1] = g.min(255.0) as u8;
+            pixels[index + 2] = b.min(255.0) as u8;
+            pixels[index + 3] = 255;
+        }
+    }
+    Image::from_rgba8(buffer)
+}
+
 fn color_for(id: &str) -> Color {
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
@@ -526,9 +555,7 @@ fn watch_window_restore() {
                 if was_foreground && !foreground {
                     WINDOW_BACKGROUNDED.store(true, Ordering::Relaxed);
                 }
-                if (was_minimized && !minimized)
-                    || (!was_foreground && foreground && !minimized)
-                {
+                if (was_minimized && !minimized) || (!was_foreground && foreground && !minimized) {
                     WINDOW_RESTORED.store(true, Ordering::Relaxed);
                 }
                 was_minimized = minimized;
@@ -1483,6 +1510,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_cover_accent(snapshot.cover_accent);
     let _ = audio.tx.send(AudioCmd::Volume(snapshot.volume));
     ui.set_data_dir(paths::data_dir().display().to_string().into());
+    ui.set_ambient_background(ambient_background());
     ui.set_daily_feature(PlaylistItem {
         id: "daily".into(),
         title: "每日推荐".into(),
@@ -3048,12 +3076,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let request = player_anim.fetch_add(1, Ordering::Relaxed) + 1;
                 ui.set_queue_open(false);
+                ui.set_controls_ready(false);
                 ui.set_lyrics_mode(false);
-                ui.set_cover_flying(true);
+                ui.set_workspace_hidden(false);
+                // Let the player layout settle before the clone reads the real
+                // cover/control geometry; this keeps the landing pixel-exact.
                 ui.set_player_visible(true);
+                let fly = ui.as_weak();
+                let fly_anim = player_anim.clone();
+                Timer::single_shot(Duration::from_millis(32), move || {
+                    if fly_anim.load(Ordering::Relaxed) == request {
+                        if let Some(ui) = fly.upgrade() {
+                            ui.set_cover_flying(true);
+                        }
+                    }
+                });
                 let handle = ui.as_weak();
                 let anim = player_anim.clone();
-                Timer::single_shot(Duration::from_millis(16), move || {
+                Timer::single_shot(Duration::from_millis(48), move || {
                     if anim.load(Ordering::Relaxed) == request {
                         if let Some(ui) = handle.upgrade() {
                             ui.set_player_open(true);
@@ -3062,10 +3102,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 let settle = ui.as_weak();
                 let settle_anim = player_anim.clone();
-                Timer::single_shot(Duration::from_millis(430), move || {
+                Timer::single_shot(Duration::from_millis(450), move || {
                     if settle_anim.load(Ordering::Relaxed) == request {
                         if let Some(ui) = settle.upgrade() {
                             ui.set_cover_flying(false);
+                            ui.set_controls_ready(true);
+                            ui.set_repaint_nudge(!ui.get_repaint_nudge());
+                        }
+                    }
+                });
+                // Once the player is fully opaque, stop laying out/painting the
+                // page behind it. This is a large win for software rendering.
+                let hide = ui.as_weak();
+                let hide_anim = player_anim.clone();
+                Timer::single_shot(Duration::from_millis(340), move || {
+                    if hide_anim.load(Ordering::Relaxed) == request {
+                        if let Some(ui) = hide.upgrade() {
+                            if ui.get_player_open() {
+                                ui.set_workspace_hidden(true);
+                            }
                         }
                     }
                 });
@@ -3082,6 +3137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_close_player(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_queue_open(false);
+                ui.set_workspace_hidden(false);
                 let request = player_anim.fetch_add(1, Ordering::Relaxed) + 1;
                 if ui.get_lyrics_mode() {
                     ui.set_player_open(false);
@@ -3092,10 +3148,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(ui) = handle.upgrade() {
                                 ui.set_player_visible(false);
                                 ui.set_lyrics_mode(false);
+                                ui.set_controls_ready(true);
                             }
                         }
                     });
                 } else {
+                    ui.set_controls_ready(false);
                     ui.set_cover_flying(true);
                     let handle = ui.as_weak();
                     let anim = player_anim.clone();
@@ -3108,12 +3166,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                     let settle = ui.as_weak();
                     let settle_anim = player_anim.clone();
-                    Timer::single_shot(Duration::from_millis(440), move || {
+                    Timer::single_shot(Duration::from_millis(450), move || {
                         if settle_anim.load(Ordering::Relaxed) == request {
                             if let Some(ui) = settle.upgrade() {
                                 ui.set_player_visible(false);
                                 ui.set_cover_flying(false);
                                 ui.set_lyrics_mode(false);
+                                ui.set_controls_ready(true);
+                                ui.set_repaint_nudge(!ui.get_repaint_nudge());
                             }
                         }
                     });
@@ -3300,13 +3360,11 @@ mod tests {
     #[test]
     fn playlist_id_accepts_links() {
         assert_eq!(
-            playlist_id_from_input("https://music.163.com/#/playlist?id=98765&userid=1")
-                .as_deref(),
+            playlist_id_from_input("https://music.163.com/#/playlist?id=98765&userid=1").as_deref(),
             Some("98765")
         );
         assert_eq!(
-            playlist_id_from_input("https://music.163.com/playlist/45678/")
-                .as_deref(),
+            playlist_id_from_input("https://music.163.com/playlist/45678/").as_deref(),
             Some("45678")
         );
     }
