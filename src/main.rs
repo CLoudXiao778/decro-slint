@@ -524,7 +524,7 @@ fn watch_window_restore() {
                 }
                 was_minimized = minimized;
                 was_foreground = foreground;
-                std::thread::sleep(Duration::from_millis(60));
+                std::thread::sleep(Duration::from_millis(40));
             }
         });
 }
@@ -1502,7 +1502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = weak.clone();
         let restore_timer = Timer::default();
-        restore_timer.start(TimerMode::Repeated, Duration::from_millis(80), move || {
+        restore_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             if !WINDOW_RESTORED.swap(false, Ordering::Relaxed) {
                 return;
             }
