@@ -22,6 +22,7 @@ export struct PlaylistItem {
 export struct LyricItem {
     time: float,
     text: string,
+    translation: string,
 }
 
 // ── Small building blocks ────────────────────────────────────────────────
@@ -110,23 +111,74 @@ component PillButton inherits Rectangle {
     }
 }
 
+component Switch inherits Rectangle {
+    in property <bool> checked;
+    callback toggled(bool);
+    width: 46px;
+    height: 26px;
+    border-radius: 13px;
+    background: root.checked ? #ff645d : #48484f;
+    animate background { duration: 150ms; }
+    Rectangle {
+        x: root.checked ? root.width - 23px : 3px;
+        y: 3px;
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: #ffffff;
+        animate x { duration: 160ms; easing: ease-out; }
+    }
+    TouchArea { clicked => { root.toggled(!root.checked); } }
+}
+
+component SettingsToggleRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> checked;
+    callback toggled(bool);
+    height: 74px;
+    border-radius: 16px;
+    background: #242528;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 16px;
+        cross-axis-alignment: center;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
+            alignment: center;
+            Text { text: root.title; color: #f5f5f7; font-size: 14px; font-weight: 600; overflow: elide; }
+            Text { text: root.description; color: #8e8e93; font-size: 11px; overflow: elide; }
+        }
+        Switch {
+            checked: root.checked;
+            toggled(value) => { root.toggled(value); }
+        }
+    }
+}
+
 component RoundIconButton inherits Rectangle {
     in property <image> icon;
     in property <length> icon-size: 20px;
     in property <length> button-size: 62px;
     in property <color> background-color: #ffffff21;
+    in property <color> tint: #ffffff;
     callback clicked();
     width: root.button-size;
     height: root.button-size;
     border-radius: self.width / 2;
     background: tap.has-hover ? #ffffff30 : root.background-color;
+    transform-scale-x: tap.pressed ? 92% : (tap.has-hover ? 105% : 100%);
+    transform-scale-y: tap.pressed ? 92% : (tap.has-hover ? 105% : 100%);
     animate background { duration: 140ms; }
+    animate transform-scale-x, transform-scale-y { duration: 120ms; easing: ease-out; }
     Glyph {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         source: root.icon;
         glyph-size: root.icon-size;
-        tint: #ffffff;
+        tint: root.tint;
     }
     tap := TouchArea { clicked => { root.clicked(); } }
 }
@@ -334,6 +386,7 @@ component MediaRow inherits Rectangle {
 
 component PlaylistRow inherits Rectangle {
     in property <PlaylistItem> item;
+    in property <bool> circle;
     callback clicked();
     height: 72px;
     border-radius: 16px;
@@ -346,13 +399,13 @@ component PlaylistRow inherits Rectangle {
         Rectangle {
             width: 52px;
             height: 52px;
-            border-radius: 12px;
+            border-radius: root.circle ? 26px : 12px;
             background: root.item.tint;
             clip: true;
             Image { width: 100%; height: 100%; source: root.item.cover; image-fit: cover; }
             if root.item.cover.width == 0 : Text {
                 x: 0; y: 0; width: 100%; height: 100%;
-                text: "♫";
+                text: root.circle ? "♬" : "♫";
                 color: #ffffff77;
                 font-size: 20px;
                 horizontal-alignment: center;
@@ -472,7 +525,9 @@ component SearchField inherits Rectangle {
 component TextField inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
+    in property <bool> autofocus;
     callback accepted();
+    init => { if root.autofocus { input.focus(); } }
     height: 40px;
     border-radius: 10px;
     background: #101012;
@@ -626,6 +681,9 @@ export component AppWindow inherits Window {
     in property <string> data-dir: "";
     in property <string> quality: "exhigh";
     in property <string> log-level: "info";
+    in property <bool> low-power;
+    in property <bool> show-translation: true;
+    in property <bool> cover-accent: true;
 
     // Models
     in property <[PlaylistItem]> playlists;
@@ -644,9 +702,20 @@ export component AppWindow inherits Window {
     in property <color> detail-cover-tint: #17171a;
     in property <image> detail-cover-image;
     in property <image> detail-backdrop;
+    in property <[PlaylistItem]> detail-albums;
+    in property <bool> detail-subscribed;
+    in property <string> detail-kind: "";
+    in property <string> detail-id: "";
+    in property <string> detail-origin: "home";
     in property <[TrackItem]> search-tracks;
     in property <[PlaylistItem]> search-playlists;
+    in property <[PlaylistItem]> search-artists;
+    in property <[PlaylistItem]> search-albums;
+    in-out property <string> search-kind: "song";
     in-out property <string> search-text: "";
+    in-out property <bool> playlist-dialog-open;
+    in-out property <string> playlist-dialog-mode: "create";
+    in-out property <string> playlist-dialog-text: "";
 
     // Player
     in property <string> current-id: "";
@@ -661,11 +730,19 @@ export component AppWindow inherits Window {
     in property <string> duration-text: "00:00";
     in property <bool> playing;
     in property <bool> loading;
+    in property <bool> current-liked;
     in-out property <float> progress;
     in property <float> duration;
     in-out property <float> volume: 0.64;
     in-out property <bool> player-open;
     in-out property <bool> player-visible;
+    in-out property <bool> cover-flying;
+    in property <[TrackItem]> queue-tracks;
+    in property <int> queue-index;
+    in-out property <bool> queue-open;
+    private property <length> player-cover-size: 360px;
+    private property <length> player-cover-fly-x: 68px + ((root.width - 136px) * 0.4 - root.player-cover-size) / 2;
+    private property <length> player-cover-fly-y: root.titlebar-height + 60px + (root.height - root.titlebar-height - 196px - root.player-cover-size) / 2;
     in-out property <bool> lyrics-mode;
     in property <[LyricItem]> lyrics;
     in property <int> lyric-index;
@@ -688,9 +765,17 @@ export component AppWindow inherits Window {
     callback search(string);
     callback open-playlist(string);
     callback open-daily();
+    callback open-artist(string);
+    callback open-album(string);
+    callback back-detail();
+    callback toggle-subscribe();
+    callback open-playlist-dialog(string);
+    callback close-playlist-dialog();
+    callback submit-playlist-dialog(string);
     callback play-track(string);
     callback play-detail(string);
     callback toggle-play();
+    callback toggle-like();
     callback next();
     callback prev();
     callback seek(float);
@@ -699,9 +784,14 @@ export component AppWindow inherits Window {
     callback seek-lyric(float);
     callback set-quality(string);
     callback set-log-level(string);
+    callback set-low-power(bool);
+    callback set-cover-accent(bool);
+    callback set-show-translation(bool);
     callback open-log-folder();
     callback open-player();
     callback close-player();
+    callback toggle-queue();
+    callback play-queue(int);
 
     // Page transition is expressed with a soft opacity fade.
     in-out property <float> page-opacity: 1;
@@ -1146,6 +1236,16 @@ export component AppWindow inherits Window {
                             cross-axis-alignment: center;
                             Text { text: "资料库"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
                             Rectangle { horizontal-stretch: 1; }
+                            if root.logged-in : PillButton {
+                                label: "新建歌单";
+                                width: 92px;
+                                clicked => { root.open-playlist-dialog("create"); }
+                            }
+                            if root.logged-in : PillButton {
+                                label: "添加歌单";
+                                width: 92px;
+                                clicked => { root.open-playlist-dialog("add"); }
+                            }
                             Rectangle {
                                 width: 34px; height: 34px; border-radius: 17px;
                                 background: @linear-gradient(135deg, #7e838d, #3c4149);
@@ -1243,7 +1343,15 @@ export component AppWindow inherits Window {
                             font-size: 13px;
                         }
 
-                        if root.search-tracks.length > 0 : VerticalLayout {
+                        if !root.search-text.is-empty : HorizontalLayout {
+                            spacing: 8px;
+                            PillButton { label: "歌曲"; width: 84px; primary: root.search-kind == "song"; clicked => { root.search-kind = "song"; } }
+                            PillButton { label: "歌单"; width: 84px; primary: root.search-kind == "playlist"; clicked => { root.search-kind = "playlist"; } }
+                            PillButton { label: "歌手"; width: 84px; primary: root.search-kind == "artist"; clicked => { root.search-kind = "artist"; } }
+                            PillButton { label: "专辑"; width: 84px; primary: root.search-kind == "album"; clicked => { root.search-kind = "album"; } }
+                        }
+
+                        if root.search-kind == "song" && root.search-tracks.length > 0 : VerticalLayout {
                             spacing: 10px;
                             Text { text: "歌曲"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
                             VerticalLayout {
@@ -1256,7 +1364,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.search-playlists.length > 0 : VerticalLayout {
+                        if root.search-kind == "playlist" && root.search-playlists.length > 0 : VerticalLayout {
                             spacing: 12px;
                             Text { text: "歌单"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
                             Flickable {
@@ -1270,6 +1378,41 @@ export component AppWindow inherits Window {
                                     clicked => { root.open-playlist(item.id); }
                                 }
                             }
+                        }
+
+                        if root.search-kind == "artist" && root.search-artists.length > 0 : VerticalLayout {
+                            spacing: 10px;
+                            Text { text: "歌手"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            VerticalLayout {
+                                spacing: 6px;
+                                for item in root.search-artists : PlaylistRow {
+                                    item: item;
+                                    circle: true;
+                                    clicked => { root.open-artist(item.id); }
+                                }
+                            }
+                        }
+
+                        if root.search-kind == "album" && root.search-albums.length > 0 : VerticalLayout {
+                            spacing: 10px;
+                            Text { text: "专辑"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            VerticalLayout {
+                                spacing: 6px;
+                                for item in root.search-albums : PlaylistRow {
+                                    item: item;
+                                    clicked => { root.open-album(item.id); }
+                                }
+                            }
+                        }
+
+                        if !root.search-text.is-empty
+                            && ((root.search-kind == "song" && root.search-tracks.length == 0)
+                                || (root.search-kind == "playlist" && root.search-playlists.length == 0)
+                                || (root.search-kind == "artist" && root.search-artists.length == 0)
+                                || (root.search-kind == "album" && root.search-albums.length == 0)) : Text {
+                            text: "没有找到相关结果，换个关键词试试。";
+                            color: #77777d;
+                            font-size: 13px;
                         }
                     }
                 }
@@ -1322,6 +1465,7 @@ export component AppWindow inherits Window {
                             clip: true;
                             background: root.detail-cover-tint;
                             Image {
+                                visible: root.cover-accent && !root.low-power;
                                 width: 100%;
                                 height: 100%;
                                 source: root.detail-backdrop;
@@ -1343,7 +1487,15 @@ export component AppWindow inherits Window {
                                 background: #00000033;
                                 border-width: 1px;
                                 border-color: #ffffff1a;
-                                clicked => { root.nav("home"); }
+                                clicked => { root.back-detail(); }
+                            }
+                            if root.detail-kind == "playlist" && root.logged-in : PillButton {
+                                x: parent.width - 132px;
+                                y: 23px;
+                                label: root.detail-subscribed ? "已收藏" : "收藏歌单";
+                                width: 96px;
+                                primary: root.detail-subscribed;
+                                clicked => { root.toggle-subscribe(); }
                             }
                             VerticalLayout {
                                 alignment: center;
@@ -1381,6 +1533,9 @@ export component AppWindow inherits Window {
                                 height: 64px;
                                 border-radius: 23px;
                                 background: detail-play-tap.has-hover ? #ffffff : #f5f4f2;
+                                transform-scale-x: detail-play-tap.pressed ? 96% : (detail-play-tap.has-hover ? 102% : 100%);
+                                transform-scale-y: detail-play-tap.pressed ? 96% : (detail-play-tap.has-hover ? 102% : 100%);
+                                animate transform-scale-x, transform-scale-y { duration: 120ms; easing: ease-out; }
                                 drop-shadow-color: #00000066;
                                 drop-shadow-blur: 24px;
                                 drop-shadow-offset-y: 8px;
@@ -1410,6 +1565,23 @@ export component AppWindow inherits Window {
                                     item: track;
                                     current: track.id == root.current-id;
                                     clicked => { root.play-detail(track.id); }
+                                }
+                            }
+                        }
+
+                        if root.detail-kind == "artist" && root.detail-albums.length > 0 : VerticalLayout {
+                            padding-top: 18px; padding-left: 30px; padding-right: 30px;
+                            spacing: 12px;
+                            Text { text: "专辑"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.detail-albums.length * 192px;
+                                content-height: self.height;
+                                for item[index] in root.detail-albums : FeatureCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: item;
+                                    clicked => { root.open-album(item.id); }
                                 }
                             }
                         }
@@ -1474,6 +1646,26 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
+                                Text { text: "个性化"; color: #8e8e93; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
+                                SettingsToggleRow {
+                                    title: "封面取色";
+                                    description: "让播放页和详情页的环境光跟随当前封面。";
+                                    checked: root.cover-accent;
+                                    toggled(value) => { root.set-cover-accent(value); }
+                                }
+                                SettingsToggleRow {
+                                    title: "显示歌词翻译";
+                                    description: "在歌词下方显示可用翻译。";
+                                    checked: root.show-translation;
+                                    toggled(value) => { root.set-show-translation(value); }
+                                }
+                                SettingsToggleRow {
+                                    title: "性能模式";
+                                    description: "关闭封面模糊等效果，降低低配电脑的占用。";
+                                    checked: root.low-power;
+                                    toggled(value) => { root.set-low-power(value); }
+                                }
+
                                 Text { text: "播放音质（下一首生效）"; color: #8e8e93; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
                                 HorizontalLayout {
                                     spacing: 8px;
@@ -1515,7 +1707,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.2.3 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.3.0 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -1546,6 +1738,7 @@ export component AppWindow inherits Window {
             cross-axis-alignment: center;
 
             Rectangle {
+                visible: !root.cover-flying;
                 width: 62px;
                 height: 62px;
                 border-radius: 16px;
@@ -1651,6 +1844,107 @@ export component AppWindow inherits Window {
         }
     }
 
+    // ── Flying cover between the dock and the player ─────────────────────
+    Rectangle {
+        visible: root.cover-flying;
+        z: 45;
+        x: root.player-open ? root.player-cover-fly-x : root.sidebar-width + 36px;
+        y: root.player-open ? root.player-cover-fly-y : root.height - 90px;
+        width: root.player-open ? root.player-cover-size : 62px;
+        height: root.player-open ? root.player-cover-size : 62px;
+        border-radius: root.player-open ? 24px : 16px;
+        background: root.current-cover;
+        clip: true;
+        drop-shadow-color: #00000066;
+        drop-shadow-blur: 28px;
+        drop-shadow-offset-y: 10px;
+        Image { width: 100%; height: 100%; source: root.current-cover-image; image-fit: cover; image-rendering: smooth; }
+        if root.current-cover-image.width == 0 : Text {
+            x: 0; y: 0; width: 100%; height: 100%;
+            text: "♪";
+            color: #ffffff88;
+            font-size: root.player-open ? 60px : 24px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        animate x, y, width, height, border-radius { duration: 380ms; easing: ease-out; }
+    }
+
+    // ── Playlist dialog ──────────────────────────────────────────────────
+    if root.playlist-dialog-open : Rectangle {
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+        z: 190;
+        background: #000000b8;
+        TouchArea { clicked => { root.close-playlist-dialog(); } }
+        Rectangle {
+            width: 440px;
+            height: root.playlist-dialog-mode == "create" ? 268px : 300px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            border-radius: 24px;
+            background: #1b1c1e;
+            border-width: 1px;
+            border-color: #ffffff16;
+            drop-shadow-color: #000000aa;
+            drop-shadow-blur: 50px;
+            drop-shadow-offset-y: 18px;
+            VerticalLayout {
+                padding: 22px;
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    cross-axis-alignment: center;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.playlist-dialog-mode == "create" ? "新建歌单" : "添加歌单";
+                        color: #f5f5f7;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                    IconButton {
+                        icon: @image-url("../assets/icons/close.svg");
+                        icon-size: 14px;
+                        width: 30px; height: 30px; border-radius: 15px;
+                        background: #ffffff0d;
+                        clicked => { root.close-playlist-dialog(); }
+                    }
+                }
+                Text {
+                    text: root.playlist-dialog-mode == "create"
+                        ? "给新歌单起一个名字。"
+                        : "输入歌单 ID 或网易云歌单链接，添加到资料库。";
+                    color: #8e8e93;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                TextField {
+                    text <=> root.playlist-dialog-text;
+                    placeholder: root.playlist-dialog-mode == "create" ? "歌单名称" : "歌单 ID 或链接";
+                    autofocus: true;
+                    accepted => { root.submit-playlist-dialog(root.playlist-dialog-text); }
+                }
+                Rectangle { height: 4px; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    PillButton {
+                        label: "取消";
+                        width: 84px;
+                        clicked => { root.close-playlist-dialog(); }
+                    }
+                    PillButton {
+                        label: root.playlist-dialog-mode == "create" ? "创建" : "添加";
+                        width: 84px;
+                        primary: true;
+                        disabled: root.playlist-dialog-text.is-empty;
+                        clicked => { root.submit-playlist-dialog(root.playlist-dialog-text); }
+                    }
+                }
+            }
+        }
+    }
+
     // ── Login modal ──────────────────────────────────────────────────────
     if root.login-open && !root.logged-in : Rectangle {
         x: 0; y: 0;
@@ -1727,10 +2021,12 @@ export component AppWindow inherits Window {
         height: root.height - root.titlebar-height;
         z: 40;
         background: #090a0c;
+        clip: true;
         opacity: root.player-open ? 1 : 0;
         animate opacity { duration: 220ms; easing: ease-out; }
 
         Image {
+            visible: root.cover-accent && !root.low-power;
             x: -root.width * 0.08;
             y: -root.height * 0.08;
             width: root.width * 1.16;
@@ -1800,8 +2096,9 @@ export component AppWindow inherits Window {
                     cross-axis-alignment: center;
                     spacing: 14px;
                     Rectangle {
-                        width: 360px;
-                        height: 360px;
+                        visible: !root.cover-flying;
+                        width: root.player-cover-size;
+                        height: root.player-cover-size;
                         border-radius: 24px;
                         background: root.current-cover;
                         clip: true;
@@ -1857,13 +2154,26 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                     alignment: center;
                     spacing: 10px;
-                    Text {
-                        text: root.current-title;
-                        color: #ffffff;
-                        font-size: 42px;
-                        font-weight: 700;
-                        overflow: elide;
-                        horizontal-alignment: left;
+                    HorizontalLayout {
+                        spacing: 14px;
+                        cross-axis-alignment: center;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.current-title;
+                            color: #ffffff;
+                            font-size: 42px;
+                            font-weight: 700;
+                            overflow: elide;
+                            horizontal-alignment: left;
+                        }
+                        RoundIconButton {
+                            icon: @image-url("../assets/icons/star.svg");
+                            icon-size: 20px;
+                            button-size: 44px;
+                            background-color: root.current-liked ? #ffffff1f : #ffffff0d;
+                            tint: root.current-liked ? #ff645d : #ffffff;
+                            clicked => { root.toggle-like(); }
+                        }
                     }
                     Text {
                         text: root.current-artist;
@@ -1925,19 +2235,30 @@ export component AppWindow inherits Window {
                         width: parent.width;
                         height: root.lyric-line-height;
                         background: line-tap.has-hover ? #ffffff08 : transparent;
-                        Text {
-                            x: 0;
-                            width: 100%;
-                            height: parent.height;
-                            text: line.text;
-                            color: index == root.lyric-index ? #ffffff : #ffffff78;
-                            font-size: index == root.lyric-index ? 38px : 23px;
-                            font-weight: index == root.lyric-index ? 700 : 400;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            animate color { duration: 180ms; }
-                            animate font-size { duration: 180ms; }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: line.text;
+                                color: index == root.lyric-index ? #ffffff : #ffffff78;
+                                font-size: index == root.lyric-index ? 38px : 23px;
+                                font-weight: index == root.lyric-index ? 700 : 400;
+                                horizontal-alignment: center;
+                                overflow: elide;
+                                animate color { duration: 180ms; }
+                                animate font-size { duration: 180ms; }
+                            }
+                            if line.translation != "" && root.show-translation : Text {
+                                horizontal-stretch: 1;
+                                text: line.translation;
+                                color: index == root.lyric-index ? #ffffffa8 : #ffffff66;
+                                font-size: index == root.lyric-index ? 15px : 12px;
+                                horizontal-alignment: center;
+                                overflow: elide;
+                                animate color { duration: 180ms; }
+                                animate font-size { duration: 180ms; }
+                            }
                         }
                         line-tap := TouchArea {
                             clicked => {
@@ -1979,6 +2300,13 @@ export component AppWindow inherits Window {
                             background-color: root.lyrics-mode ? #ffffff1f : transparent;
                             clicked => { root.lyrics-mode = !root.lyrics-mode; }
                         }
+                        RoundIconButton {
+                            icon: @image-url("../assets/icons/queue.svg");
+                            icon-size: 18px;
+                            button-size: 36px;
+                            background-color: root.queue-open ? #ffffff1f : transparent;
+                            clicked => { root.toggle-queue(); }
+                        }
                     }
                     Rectangle { horizontal-stretch: 1; }
                     HorizontalLayout {
@@ -1995,7 +2323,10 @@ export component AppWindow inherits Window {
                             height: 64px;
                             border-radius: 23px;
                             background: play-tap.has-hover ? #ffffff : #f5f4f2;
+                            transform-scale-x: play-tap.pressed ? 96% : (play-tap.has-hover ? 102% : 100%);
+                            transform-scale-y: play-tap.pressed ? 96% : (play-tap.has-hover ? 102% : 100%);
                             animate background { duration: 140ms; }
+                            animate transform-scale-x, transform-scale-y { duration: 120ms; easing: ease-out; }
                             Glyph {
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
@@ -2023,6 +2354,87 @@ export component AppWindow inherits Window {
                             value <=> root.volume;
                             changed(value) => { root.volume-changed(value); }
                             released => { root.volume-released(root.volume); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Play queue
+        if root.queue-open : Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000033;
+            queue-scrim := TouchArea { clicked => { root.queue-open = false; } }
+        }
+        if root.queue-open : Rectangle {
+            x: root.width - 372px;
+            y: 70px;
+            width: 332px;
+            height: root.height - root.titlebar-height - 160px;
+            z: 60;
+            border-radius: 22px;
+            background: #17181aee;
+            border-width: 1px;
+            border-color: #ffffff1a;
+            clip: true;
+            drop-shadow-color: #0000008c;
+            drop-shadow-blur: 40px;
+            drop-shadow-offset-y: 14px;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    cross-axis-alignment: center;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        alignment: center;
+                        Text { text: "播放队列"; color: #f5f5f7; font-size: 17px; font-weight: 700; }
+                        Text { text: root.queue-tracks.length + " 首"; color: #8e8e93; font-size: 10px; }
+                    }
+                    IconButton {
+                        icon: @image-url("../assets/icons/close.svg");
+                        icon-size: 14px;
+                        width: 30px; height: 30px; border-radius: 15px;
+                        background: #ffffff0d;
+                        clicked => { root.queue-open = false; }
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 4px;
+                        for track[index] in root.queue-tracks : Rectangle {
+                            height: 54px;
+                            border-radius: 12px;
+                            background: index == root.queue-index ? #c9202733 : (queue-row-tap.has-hover ? #ffffff0d : transparent);
+                            HorizontalLayout {
+                                padding: 7px;
+                                spacing: 10px;
+                                cross-axis-alignment: center;
+                                Rectangle {
+                                    width: 38px; height: 38px; border-radius: 9px;
+                                    background: track.tint;
+                                    clip: true;
+                                    Image { width: 100%; height: 100%; source: track.cover; image-fit: cover; }
+                                    if track.cover.width == 0 : Text {
+                                        x: 0; y: 0; width: 100%; height: 100%;
+                                        text: "♪"; color: #ffffff77; font-size: 15px;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    alignment: center;
+                                    Text { text: track.title; color: index == root.queue-index ? #ff8a84 : #f5f5f7; font-size: 12px; font-weight: 600; overflow: elide; }
+                                    Text { text: track.artist; color: #8e8e93; font-size: 10px; overflow: elide; }
+                                }
+                                Text { text: track.duration; color: #77777d; font-size: 9px; vertical-alignment: center; }
+                            }
+                            queue-row-tap := TouchArea { clicked => { root.play-queue(index); } }
                         }
                     }
                 }

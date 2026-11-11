@@ -1,6 +1,6 @@
 [package]
 name = "decro-slint"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 description = "Decro Slint portable client"
 
@@ -30,6 +30,15 @@ rodio = "0.20"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory"] }
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Media",
+    "Storage",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_WinRT",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 codegen-units = 1

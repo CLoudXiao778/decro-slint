@@ -688,10 +688,7 @@ async fn fetch_playlist_detail(state: &AppState, id: &str) -> Result<PlaylistDto
         .ok_or_else(|| "歌单不存在、已下架或不可访问".to_string())
 }
 
-pub async fn playlist_detail(
-    state: &AppState,
-    id: String,
-) -> Result<PlaylistDto, String> {
+pub async fn playlist_detail(state: &AppState, id: String) -> Result<PlaylistDto, String> {
     fetch_playlist_detail(&state, &id).await
 }
 
@@ -896,10 +893,7 @@ pub async fn subscribe_playlist(id: String, subscribe: bool) -> Result<(), Strin
         .map_err(|error| format!("收藏歌单线程失败: {error}"))?
 }
 
-pub async fn search_music(
-    state: &AppState,
-    keyword: String,
-) -> Result<SearchData, String> {
+pub async fn search_music(state: &AppState, keyword: String) -> Result<SearchData, String> {
     let keyword = keyword.trim().to_string();
     if keyword.is_empty() {
         return Ok(SearchData::empty());
@@ -912,20 +906,40 @@ pub async fn search_music(
         ("offset", "0".to_string()),
     ];
     let playlist_query = [
-        ("s", keyword),
+        ("s", keyword.clone()),
         ("type", "1000".to_string()),
         ("limit", "12".to_string()),
         ("offset", "0".to_string()),
     ];
-    let (songs_result, playlists_result) = tokio::join!(
+    let artist_query = [
+        ("s", keyword.clone()),
+        ("type", "100".to_string()),
+        ("limit", "18".to_string()),
+        ("offset", "0".to_string()),
+    ];
+    let album_query = [
+        ("s", keyword),
+        ("type", "10".to_string()),
+        ("limit", "24".to_string()),
+        ("offset", "0".to_string()),
+    ];
+    let (songs_result, playlists_result, artists_result, albums_result) = tokio::join!(
         get_json(state, "/api/cloudsearch/pc", &song_query),
         get_json(state, "/api/cloudsearch/pc", &playlist_query),
+        get_json(state, "/api/cloudsearch/pc", &artist_query),
+        get_json(state, "/api/cloudsearch/pc", &album_query),
     );
 
-    if songs_result.is_err() && playlists_result.is_err() {
+    if songs_result.is_err()
+        && playlists_result.is_err()
+        && artists_result.is_err()
+        && albums_result.is_err()
+    {
         return Err(songs_result
             .err()
             .or_else(|| playlists_result.err())
+            .or_else(|| artists_result.err())
+            .or_else(|| albums_result.err())
             .unwrap_or_else(|| "搜索失败，请稍后再试".to_string()));
     }
 
@@ -948,9 +962,35 @@ pub async fn search_music(
         })
         .unwrap_or_default();
 
+    let artists = artists_result
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/result/artists")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(normalize_artist).collect())
+        })
+        .unwrap_or_default();
+    let albums = albums_result
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/result/albums")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|album| normalize_album(album, "", ""))
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
+
     Ok(SearchData {
         songs,
         playlists,
+        artists,
+        albums,
         ..SearchData::empty()
     })
 }
@@ -1151,11 +1191,7 @@ pub async fn lyric(state: &AppState, id: String) -> Result<LyricData, String> {
     Ok(LyricData { lines })
 }
 
-pub async fn like_song(
-    state: &AppState,
-    id: String,
-    like: bool,
-) -> Result<LikeResult, String> {
+pub async fn like_song(state: &AppState, id: String, like: bool) -> Result<LikeResult, String> {
     if state.account().is_none() {
         return Err("请先登录网易云".to_string());
     }
