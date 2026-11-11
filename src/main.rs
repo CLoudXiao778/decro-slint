@@ -13,20 +13,25 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
 use slint::{Color, ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel, Weak};
 use state::{AppState, ProxyInfo};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 slint::include_modules!();
 
 #[derive(Default, Clone)]
 struct Catalog {
     recent: Vec<netease::TrackDto>,
+    daily: Vec<netease::TrackDto>,
     new_songs: Vec<netease::TrackDto>,
     playlists: Vec<netease::PlaylistDto>,
     library_recent: Vec<netease::TrackDto>,
@@ -47,8 +52,15 @@ struct Player {
 struct AudioSnapshot {
     position: f32,
     playing: bool,
+    loaded: bool,
     ended: bool,
     error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedPlayer {
+    queue: Vec<netease::TrackDto>,
+    index: usize,
 }
 
 enum AudioCmd {
@@ -96,6 +108,7 @@ fn spawn_audio() -> AudioHandle {
                             loaded = true;
                             if let Ok(mut state) = snap.lock() {
                                 state.position = 0.0;
+                                state.loaded = true;
                                 state.ended = false;
                                 state.error = None;
                             }
@@ -106,6 +119,7 @@ fn spawn_audio() -> AudioHandle {
                                 state.error = Some(format!("音频解码失败: {error}"));
                                 state.ended = false;
                                 state.playing = false;
+                                state.loaded = false;
                             }
                         }
                     }
@@ -131,15 +145,16 @@ fn spawn_audio() -> AudioHandle {
             let position = sink.get_pos().as_secs_f32();
             let playing = loaded && !sink.empty() && !sink.is_paused();
             let ended = loaded && sink.empty();
+            if ended {
+                loaded = false;
+            }
             if let Ok(mut state) = snap.lock() {
                 state.position = position;
                 state.playing = playing;
+                state.loaded = loaded;
                 if ended {
                     state.ended = true;
                 }
-            }
-            if ended {
-                loaded = false;
             }
         }
     });
@@ -174,21 +189,32 @@ fn track_item(track: &netease::TrackDto) -> TrackItem {
     }
 }
 
-fn playlist_item(playlist: &netease::PlaylistDto) -> PlaylistItem {
-    PlaylistItem {
-        id: playlist.id.clone().into(),
-        title: playlist.name.clone().into(),
-        meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
-        cover: color_for(&playlist.id),
-    }
+/// Must run on the UI thread: it decodes cached covers into Slint images.
+fn playlist_items_for_ui(
+    items: &[netease::PlaylistDto],
+    covers: &[Option<PathBuf>],
+) -> Vec<PlaylistItem> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, playlist)| {
+            let cover = covers
+                .get(index)
+                .and_then(|path| path.as_ref())
+                .and_then(|path| Image::load_from_path(path).ok());
+            PlaylistItem {
+                id: playlist.id.clone().into(),
+                title: playlist.name.clone().into(),
+                meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
+                cover: cover.unwrap_or_default(),
+                tint: color_for(&playlist.id),
+            }
+        })
+        .collect()
 }
 
 fn track_items(items: &[netease::TrackDto]) -> Vec<TrackItem> {
     items.iter().map(track_item).collect()
-}
-
-fn playlist_items(items: &[netease::PlaylistDto]) -> Vec<PlaylistItem> {
-    items.iter().map(playlist_item).collect()
 }
 
 fn update_ui<F: FnOnce(&AppWindow) + Send + 'static>(ui: &Weak<AppWindow>, f: F) {
@@ -230,24 +256,212 @@ fn qr_image(url: &str) -> Option<Image> {
     Some(Image::from_rgba8(buffer))
 }
 
-fn load_volume() -> f32 {
-    fs::read_to_string(paths::data_dir().join("settings.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| value.get("volume").and_then(|v| v.as_f64()))
-        .map(|value| (value as f32).clamp(0.0, 1.0))
-        .unwrap_or(0.7)
+#[derive(Clone)]
+struct Prefs {
+    volume: f32,
+    quality: String,
 }
 
-fn save_volume(value: f32) {
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            volume: 0.7,
+            quality: "exhigh".to_string(),
+        }
+    }
+}
+
+fn normalize_quality(value: &str) -> &'static str {
+    match value {
+        "standard" => "standard",
+        "higher" => "higher",
+        "exhigh" => "exhigh",
+        "lossless" => "lossless",
+        "hires" => "hires",
+        _ => "exhigh",
+    }
+}
+
+fn quality_label(value: &str) -> &'static str {
+    match value {
+        "standard" => "标准",
+        "higher" => "较高",
+        "exhigh" => "极高",
+        "lossless" => "无损",
+        "hires" => "Hi-Res",
+        _ => "极高",
+    }
+}
+
+fn load_prefs() -> Prefs {
+    let value = fs::read_to_string(paths::data_dir().join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+    Prefs {
+        volume: value
+            .get("volume")
+            .and_then(|v| v.as_f64())
+            .map(|v| (v as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.7),
+        quality: normalize_quality(
+            value
+                .get("quality")
+                .and_then(|v| v.as_str())
+                .unwrap_or("exhigh"),
+        )
+        .to_string(),
+    }
+}
+
+fn save_prefs(prefs: &Prefs) {
     let path = paths::data_dir().join("settings.json");
-    let payload = format!("{{\"volume\":{:.4}}}", value.clamp(0.0, 1.0));
-    let _ = fs::write(path, payload);
+    let payload = serde_json::json!({
+        "volume": prefs.volume.clamp(0.0, 1.0),
+        "quality": prefs.quality,
+    });
+    let _ = fs::write(path, payload.to_string());
+}
+
+fn cover_url(url: &str, size: u32) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+    let base = url.split('?').next().unwrap_or(url);
+    format!("{base}?param={size}y{size}")
+}
+
+fn cover_cache_base(url: &str) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    url.hash(&mut hasher);
+    paths::cover_dir().join(format!("{:016x}", hasher.finish()))
+}
+
+async fn fetch_cover(state: &AppState, url: String) -> Option<PathBuf> {
+    if url.is_empty() {
+        return None;
+    }
+    let base = cover_cache_base(&url);
+    for extension in ["jpg", "png"] {
+        let path = base.with_extension(extension);
+        if path.metadata().map(|meta| meta.len() > 0).unwrap_or(false) {
+            return Some(path);
+        }
+    }
+    let response = state.api.get(&url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    if !response
+        .url()
+        .host_str()
+        .is_some_and(state::is_allowed_audio_host)
+    {
+        return None;
+    }
+    let bytes = response.bytes().await.ok()?;
+    if bytes.is_empty() || bytes.len() > 4_000_000 {
+        return None;
+    }
+    let extension = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png"
+    } else {
+        return None;
+    };
+    let path = base.with_extension(extension);
+    fs::write(&path, &bytes).ok()?;
+    Some(path)
+}
+
+async fn fetch_covers(
+    state: &AppState,
+    urls: Vec<String>,
+    max_wait: Duration,
+) -> Vec<Option<PathBuf>> {
+    let mut result = vec![None; urls.len()];
+    let semaphore = Arc::new(Semaphore::new(6));
+    let mut tasks = JoinSet::new();
+    for (index, url) in urls.into_iter().enumerate() {
+        if url.is_empty() {
+            continue;
+        }
+        let state = state.clone();
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            let Ok(_permit) = semaphore.acquire_owned().await else {
+                return (index, None);
+            };
+            (index, fetch_cover(&state, url).await)
+        });
+    }
+    let deadline = tokio::time::Instant::now() + max_wait;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            tasks.abort_all();
+            break;
+        }
+        match tokio::time::timeout(deadline - now, tasks.join_next()).await {
+            Ok(Some(Ok((index, path)))) => result[index] = path,
+            Ok(Some(Err(_))) => {}
+            Ok(None) => break,
+            Err(_) => {
+                tasks.abort_all();
+                break;
+            }
+        }
+    }
+    result
+}
+
+fn apply_playlist_models(
+    ui: &AppWindow,
+    items: &[netease::PlaylistDto],
+    covers: &[Option<PathBuf>],
+    target: &str,
+) {
+    let model = ModelRc::from(Rc::new(VecModel::from(playlist_items_for_ui(items, covers))));
+    match target {
+        "library" => ui.set_library_playlists(model),
+        "search" => ui.set_search_playlists(model),
+        _ => ui.set_playlists(model),
+    }
+}
+
+fn load_saved_player() -> Option<SavedPlayer> {
+    let text = fs::read_to_string(paths::data_dir().join("last-playback.json")).ok()?;
+    let saved: SavedPlayer = serde_json::from_str(&text).ok()?;
+    if saved.queue.is_empty() || saved.index >= saved.queue.len() {
+        return None;
+    }
+    Some(saved)
+}
+
+fn save_player(player: &Arc<Mutex<Player>>) {
+    let (queue, index) = match player.lock() {
+        Ok(player) => {
+            if player.queue.is_empty() {
+                return;
+            }
+            let index = player.index.min(player.queue.len() - 1);
+            let start = index.saturating_sub(50);
+            let end = (index + 150).min(player.queue.len());
+            (player.queue[start..end].to_vec(), index - start)
+        }
+        Err(_) => return,
+    };
+    if let Ok(text) = serde_json::to_string(&SavedPlayer { queue, index }) {
+        let _ = fs::write(paths::data_dir().join("last-playback.json"), text);
+    }
 }
 
 fn find_track(catalog: &Catalog, id: &str) -> Option<(netease::TrackDto, Vec<netease::TrackDto>)> {
     for list in [
         &catalog.detail,
+        &catalog.daily,
+        &catalog.library_recent,
         &catalog.recent,
         &catalog.new_songs,
         &catalog.search_songs,
@@ -267,29 +481,50 @@ fn start_track(
     _player: Arc<Mutex<Player>>,
     lyrics: Arc<Mutex<Vec<netease::LyricLine>>>,
     generation: Arc<AtomicU64>,
+    prefs: Arc<Mutex<Prefs>>,
     track: netease::TrackDto,
 ) {
     let request = generation.fetch_add(1, Ordering::Relaxed) + 1;
+    if let Ok(mut snapshot) = audio.snapshot.lock() {
+        snapshot.loaded = false;
+        snapshot.playing = false;
+        snapshot.ended = false;
+    }
     let duration = track.duration_ms as f32 / 1000.0;
     let title = track.name.clone();
     let artist = track.artist.clone();
-    let quality = track.quality.clone();
+    let requested_quality = prefs
+        .lock()
+        .ok()
+        .map(|prefs| prefs.quality.clone())
+        .unwrap_or_else(|| "exhigh".to_string());
+    let quality_text = if track.quality.is_empty() {
+        quality_label(&requested_quality).to_string()
+    } else {
+        format!("{} · {}", quality_label(&requested_quality), track.quality)
+    };
     let cover = color_for(&track.id);
     update_ui(&ui, move |ui| {
         ui.set_current_title(title.into());
         ui.set_current_artist(artist.into());
-        ui.set_current_quality(quality.into());
+        ui.set_current_quality(quality_text.into());
         ui.set_current_cover(cover);
+        ui.set_current_cover_image(Image::default());
         ui.set_duration(duration);
         ui.set_progress(0.0);
         ui.set_playing(true);
+        ui.set_loading(true);
         ui.set_status_text("正在加载音源…".into());
     });
     runtime.spawn(async move {
-        let url = match netease::resolve_song_url(&state, &track.id, None).await {
+        let url = match netease::resolve_song_url(&state, &track.id, Some(requested_quality.as_str())).await {
             Ok(url) => url,
             Err(error) => {
-                update_ui(&ui, move |ui| ui.set_status_text(error.into()));
+                update_ui(&ui, move |ui| {
+                    ui.set_status_text(error.into());
+                    ui.set_loading(false);
+                    ui.set_playing(false);
+                });
                 return;
             }
         };
@@ -304,24 +539,40 @@ fn start_track(
             Ok(response) => response,
             Err(error) => {
                 let message = format!("下载音源失败: {error}");
-                update_ui(&ui, move |ui| ui.set_status_text(message.into()));
+                update_ui(&ui, move |ui| {
+                    ui.set_status_text(message.into());
+                    ui.set_loading(false);
+                    ui.set_playing(false);
+                });
                 return;
             }
         };
         if !response.url().host_str().is_some_and(state::is_allowed_audio_host) {
-            update_ui(&ui, move |ui| ui.set_status_text("音源域名异常".into()));
+            update_ui(&ui, move |ui| {
+                ui.set_status_text("音源域名异常".into());
+                ui.set_loading(false);
+                ui.set_playing(false);
+            });
             return;
         }
         if !response.status().is_success() {
             let message = format!("音源返回 HTTP {}", response.status());
-            update_ui(&ui, move |ui| ui.set_status_text(message.into()));
+            update_ui(&ui, move |ui| {
+                ui.set_status_text(message.into());
+                ui.set_loading(false);
+                ui.set_playing(false);
+            });
             return;
         }
         let bytes = match response.bytes().await {
             Ok(bytes) => bytes.to_vec(),
             Err(error) => {
                 let message = format!("读取音源失败: {error}");
-                update_ui(&ui, move |ui| ui.set_status_text(message.into()));
+                update_ui(&ui, move |ui| {
+                    ui.set_status_text(message.into());
+                    ui.set_loading(false);
+                    ui.set_playing(false);
+                });
                 return;
             }
         };
@@ -330,11 +581,16 @@ fn start_track(
         }
         let _ = audio.tx.send(AudioCmd::Load(bytes, duration));
         let id = track.id.clone();
-        if let Ok(data) = netease::lyric(&state, id).await {
+        let cover_endpoint = cover_url(&track.cover_url, 96);
+        let (lyric_result, cover_path) = tokio::join!(
+            netease::lyric(&state, id),
+            fetch_cover(&state, cover_endpoint),
+        );
+        if generation.load(Ordering::Relaxed) != request {
+            return;
+        }
+        if let Ok(data) = lyric_result {
             let lines = data.lines.clone();
-            if generation.load(Ordering::Relaxed) != request {
-                return;
-            }
             if let Ok(mut current) = lyrics.lock() {
                 *current = lines.clone();
             }
@@ -350,6 +606,13 @@ fn start_track(
                 ui.set_lyric_index(0);
             });
         }
+        if let Some(path) = cover_path {
+            update_ui(&ui, move |ui| {
+                if let Ok(image) = Image::load_from_path(&path) {
+                    ui.set_current_cover_image(image);
+                }
+            });
+        }
         let _ = netease::report_play_start(&state, track.id.clone(), track.album_id.clone()).await;
     });
 }
@@ -363,6 +626,7 @@ fn play_relative(
     player: &Arc<Mutex<Player>>,
     lyrics: &Arc<Mutex<Vec<netease::LyricLine>>>,
     generation: &Arc<AtomicU64>,
+    prefs: &Arc<Mutex<Prefs>>,
 ) {
     let track = {
         let mut player = match player.lock() {
@@ -378,6 +642,7 @@ fn play_relative(
         player.current = Some(track.clone());
         track
     };
+    save_player(player);
     start_track(
         runtime,
         state.clone(),
@@ -386,6 +651,7 @@ fn play_relative(
         player.clone(),
         lyrics.clone(),
         generation.clone(),
+        prefs.clone(),
         track,
     );
 }
@@ -401,17 +667,38 @@ fn load_home(
             Ok(home) => {
                 if let Ok(mut catalog) = catalog.lock() {
                     catalog.recent = home.recent.clone();
+                    catalog.daily = home.daily.clone();
                     catalog.new_songs = home.new_songs.clone();
                     catalog.playlists = home.recommended.clone();
                 }
                 let recent = track_items(&home.recent);
+                let daily = track_items(&home.daily);
                 let new_songs = track_items(&home.new_songs);
-                let playlists = playlist_items(&home.recommended);
+                let recommended = home.recommended.clone();
+                let recommended_count = recommended.len();
                 update_ui(&ui, move |ui| {
                     ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(recent))));
+                    ui.set_daily_tracks(ModelRc::from(Rc::new(VecModel::from(daily))));
                     ui.set_new_tracks(ModelRc::from(Rc::new(VecModel::from(new_songs))));
-                    ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(playlists))));
-                    ui.set_status_text(format!("已加载 {} 个推荐歌单", home.recommended.len()).into());
+                    ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
+                        playlist_items_for_ui(&home.recommended, &[]),
+                    ))));
+                    ui.set_status_text(format!("已加载 {recommended_count} 个推荐歌单").into());
+                });
+                let cover_state = state.clone();
+                let cover_ui = ui.clone();
+                let urls = recommended
+                    .iter()
+                    .map(|playlist| cover_url(&playlist.cover_url, 120))
+                    .collect::<Vec<_>>();
+                tokio::spawn(async move {
+                    let covers =
+                        fetch_covers(&cover_state, urls, Duration::from_secs(4)).await;
+                    if covers.iter().any(|cover| cover.is_some()) {
+                        update_ui(&cover_ui, move |ui| {
+                            apply_playlist_models(ui, &recommended, &covers, "home");
+                        });
+                    }
                 });
             }
             Err(error) => update_ui(&ui, move |ui| ui.set_status_text(error.into())),
@@ -432,12 +719,31 @@ fn load_library(
                     catalog.library_playlists = library.playlists.clone();
                     catalog.library_recent = library.recent.clone();
                 }
-                let playlists = playlist_items(&library.playlists);
                 let recent = track_items(&library.recent);
+                let playlist_count = library.playlists.len();
+                let all_playlists = library.playlists.clone();
                 update_ui(&ui, move |ui| {
-                    ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(playlists))));
+                    ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(
+                        playlist_items_for_ui(&library.playlists, &[]),
+                    ))));
                     ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(recent))));
-                    ui.set_status_text(format!("资料库：{} 个歌单", library.playlists.len()).into());
+                    ui.set_status_text(format!("资料库：{playlist_count} 个歌单").into());
+                });
+                let cover_state = state.clone();
+                let cover_ui = ui.clone();
+                let urls = all_playlists
+                    .iter()
+                    .take(30)
+                    .map(|playlist| cover_url(&playlist.cover_url, 120))
+                    .collect::<Vec<_>>();
+                tokio::spawn(async move {
+                    let covers =
+                        fetch_covers(&cover_state, urls, Duration::from_secs(4)).await;
+                    if covers.iter().any(|cover| cover.is_some()) {
+                        update_ui(&cover_ui, move |ui| {
+                            apply_playlist_models(ui, &all_playlists, &covers, "library");
+                        });
+                    }
                 });
             }
             Err(error) => update_ui(&ui, move |ui| ui.set_status_text(error.into())),
@@ -478,13 +784,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lyrics = Arc::new(Mutex::new(Vec::<netease::LyricLine>::new()));
     let generation = Arc::new(AtomicU64::new(0));
     let qr_generation = Arc::new(AtomicU64::new(0));
+    let search_generation = Arc::new(AtomicU64::new(0));
+    let prefs = Arc::new(Mutex::new(load_prefs()));
+    let snapshot = prefs.lock().ok().map(|prefs| prefs.clone()).unwrap_or_default();
     let audio = spawn_audio();
-    let volume = load_volume();
-    ui.set_volume(volume);
-    let _ = audio.tx.send(AudioCmd::Volume(volume));
-
-    ui.set_status_text(paths::data_dir().display().to_string().into());
+    ui.set_volume(snapshot.volume);
+    ui.set_quality(snapshot.quality.clone().into());
+    let _ = audio.tx.send(AudioCmd::Volume(snapshot.volume));
+    ui.set_data_dir(paths::data_dir().display().to_string().into());
+    let log_level = fs::read_to_string(paths::data_dir().join("log-level"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let log_level = match log_level.as_str() {
+        "" => "info".to_string(),
+        "warning" => "warn".to_string(),
+        other => other.to_string(),
+    };
+    let _ = logger::set_level(&log_level);
+    ui.set_log_level(log_level.into());
+    ui.set_status_text("正在检查登录状态…".into());
     ui.set_login_open(true);
+
+    if let Some(saved) = load_saved_player() {
+        let track = saved.queue[saved.index].clone();
+        if let Ok(mut player) = player.lock() {
+            player.queue = saved.queue;
+            player.index = saved.index;
+            player.current = Some(track.clone());
+        }
+        let quality_text = if track.quality.is_empty() {
+            quality_label(&snapshot.quality).to_string()
+        } else {
+            format!("{} · {}", quality_label(&snapshot.quality), track.quality)
+        };
+        ui.set_current_title(track.name.clone().into());
+        ui.set_current_artist(track.artist.clone().into());
+        ui.set_current_quality(quality_text.into());
+        ui.set_current_cover(color_for(&track.id));
+        ui.set_duration(track.duration_ms as f32 / 1000.0);
+        ui.set_progress(0.0);
+        ui.set_playing(false);
+        let cover_endpoint = cover_url(&track.cover_url, 96);
+        if !cover_endpoint.is_empty() {
+            let cover_state = state.clone();
+            let cover_ui = weak.clone();
+            runtime.spawn(async move {
+                if let Some(path) = fetch_cover(&cover_state, cover_endpoint).await {
+                    update_ui(&cover_ui, move |ui| {
+                        if let Ok(image) = Image::load_from_path(&path) {
+                            ui.set_current_cover_image(image);
+                        }
+                    });
+                }
+            });
+        }
+    }
 
     {
         let runtime = runtime.clone();
@@ -526,6 +881,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui.set_logged_in(true);
                                             ui.set_login_open(false);
                                             ui.set_account_name(account.nickname.into());
+                                            ui.set_account_id(account.user_id.into());
                                             ui.set_status_text("登录成功，正在同步音乐库…".into());
                                         });
                                         load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
@@ -569,6 +925,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_logged_in(true);
                             ui.set_login_open(false);
                             ui.set_account_name(account.nickname.into());
+                            ui.set_account_id(account.user_id.into());
                             ui.set_status_text("Cookie 导入成功".into());
                         });
                         load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
@@ -603,6 +960,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_logged_in(false);
                     ui.set_login_open(true);
                     ui.set_account_name("".into());
+                    ui.set_account_id("".into());
                     ui.set_status_text("已退出登录".into());
                     ui.invoke_refresh_qr();
                 });
@@ -631,11 +989,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let weak = weak.clone();
         let catalog = catalog.clone();
+        let search_generation = search_generation.clone();
         ui.on_search(move |keyword| {
             let runtime = runtime.clone();
             let state = state.clone();
             let weak = weak.clone();
             let catalog = catalog.clone();
+            let search_generation = search_generation.clone();
+            let request = search_generation.fetch_add(1, Ordering::Relaxed) + 1;
             let keyword = keyword.to_string();
             runtime.spawn(async move {
                 if let Some(ui) = weak.upgrade() {
@@ -644,16 +1005,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 match netease::search_music(&state, keyword).await {
                     Ok(data) => {
+                        if search_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
                         if let Ok(mut catalog) = catalog.lock() {
                             catalog.search_songs = data.songs.clone();
                             catalog.search_playlists = data.playlists.clone();
                         }
-                        let songs = track_items(&data.songs);
-                        let playlists = playlist_items(&data.playlists);
+                        let cover_items = data.playlists.clone();
                         update_ui(&weak, move |ui| {
-                            ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(songs))));
-                            ui.set_search_playlists(ModelRc::from(Rc::new(VecModel::from(playlists))));
-                            ui.set_status_text(format!("搜索到 {} 首歌曲", data.songs.len()).into());
+                            ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
+                                track_items(&data.songs),
+                            ))));
+                            ui.set_search_playlists(ModelRc::from(Rc::new(VecModel::from(
+                                playlist_items_for_ui(&data.playlists, &[]),
+                            ))));
+                            ui.set_status_text(
+                                format!("搜索到 {} 首歌曲", data.songs.len()).into(),
+                            );
+                        });
+                        let cover_state = state.clone();
+                        let cover_ui = weak.clone();
+                        let cover_generation = search_generation.clone();
+                        let urls = cover_items
+                            .iter()
+                            .map(|playlist| cover_url(&playlist.cover_url, 120))
+                            .collect::<Vec<_>>();
+                        tokio::spawn(async move {
+                            let covers =
+                                fetch_covers(&cover_state, urls, Duration::from_secs(3)).await;
+                            if cover_generation.load(Ordering::Relaxed) != request {
+                                return;
+                            }
+                            if covers.iter().any(|cover| cover.is_some()) {
+                                update_ui(&cover_ui, move |ui| {
+                                    apply_playlist_models(
+                                        ui,
+                                        &cover_items,
+                                        &covers,
+                                        "search",
+                                    );
+                                });
+                            }
                         });
                     }
                     Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
@@ -682,12 +1075,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let tracks = track_items(&playlist.tracks);
                         let title = playlist.name.clone();
                         let meta = format!("{} · {} 首", playlist.creator, playlist.track_count);
+                        let description = playlist.description.clone();
+                        let cover_tint = color_for(&playlist.id);
+                        let cover_endpoint = cover_url(&playlist.cover_url, 200);
                         update_ui(&weak, move |ui| {
                             ui.set_page("detail".into());
                             ui.set_detail_title(title.into());
                             ui.set_detail_meta(meta.into());
+                            ui.set_detail_description(description.into());
+                            ui.set_detail_cover_tint(cover_tint);
+                            ui.set_detail_cover_image(Image::default());
                             ui.set_detail_tracks(ModelRc::from(Rc::new(VecModel::from(tracks))));
                         });
+                        if !cover_endpoint.is_empty() {
+                            let cover_state = state.clone();
+                            let cover_ui = weak.clone();
+                            let cover_title = playlist.name.clone();
+                            tokio::spawn(async move {
+                                if let Some(path) = fetch_cover(&cover_state, cover_endpoint).await {
+                                    update_ui(&cover_ui, move |ui| {
+                                        if ui.get_detail_title().as_str() == cover_title {
+                                            if let Ok(image) = Image::load_from_path(&path) {
+                                                ui.set_detail_cover_image(image);
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
                     }
                     Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
                 }
@@ -704,6 +1119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let lyrics = lyrics.clone();
         let generation = generation.clone();
         let audio = audio.clone();
+        let prefs = prefs.clone();
         ui.on_play_track(move |id| {
             let Some((track, context)) = catalog.lock().ok().and_then(|catalog| find_track(&catalog, id.as_str())) else {
                 return;
@@ -714,7 +1130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.index = index;
                 player.current = Some(track.clone());
             }
-            start_track(&runtime, state.clone(), weak.clone(), audio.clone(), player.clone(), lyrics.clone(), generation.clone(), track);
+            save_player(&player);
+            start_track(&runtime, state.clone(), weak.clone(), audio.clone(), player.clone(), lyrics.clone(), generation.clone(), prefs.clone(), track);
         });
     }
 
@@ -727,6 +1144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let lyrics = lyrics.clone();
         let generation = generation.clone();
         let audio = audio.clone();
+        let prefs = prefs.clone();
         ui.on_play_detail(move |id| {
             let track = catalog
                 .lock()
@@ -740,13 +1158,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.index = index;
                 player.current = Some(track.clone());
             }
-            start_track(&runtime, state.clone(), weak.clone(), audio.clone(), player.clone(), lyrics.clone(), generation.clone(), track);
+            save_player(&player);
+            start_track(&runtime, state.clone(), weak.clone(), audio.clone(), player.clone(), lyrics.clone(), generation.clone(), prefs.clone(), track);
         });
     }
 
     {
+        let runtime = runtime.clone();
+        let state = state.clone();
+        let weak = weak.clone();
         let audio = audio.clone();
+        let player = player.clone();
+        let lyrics = lyrics.clone();
+        let generation = generation.clone();
+        let prefs = prefs.clone();
         ui.on_toggle_play(move || {
+            if let Some(ui) = weak.upgrade() {
+                if ui.get_loading() {
+                    return;
+                }
+            }
+            let loaded = audio
+                .snapshot
+                .lock()
+                .map(|snapshot| snapshot.loaded)
+                .unwrap_or(false);
+            if !loaded {
+                let track = player
+                    .lock()
+                    .ok()
+                    .and_then(|player| player.current.clone());
+                if let Some(track) = track {
+                    start_track(
+                        &runtime,
+                        state.clone(),
+                        weak.clone(),
+                        audio.clone(),
+                        player.clone(),
+                        lyrics.clone(),
+                        generation.clone(),
+                        prefs.clone(),
+                        track,
+                    );
+                }
+                return;
+            }
             let _ = audio.tx.send(AudioCmd::PlayPause);
         });
     }
@@ -760,13 +1216,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let audio = audio.clone();
+        let prefs = prefs.clone();
         ui.on_volume_changed(move |value| {
             let _ = audio.tx.send(AudioCmd::Volume(value));
+            if let Ok(mut prefs) = prefs.lock() {
+                prefs.volume = value;
+            }
         });
     }
 
     {
-        ui.on_volume_released(move |value| save_volume(value));
+        let prefs = prefs.clone();
+        ui.on_volume_released(move |value| {
+            if let Ok(mut prefs) = prefs.lock() {
+                prefs.volume = value;
+                save_prefs(&prefs);
+            }
+        });
+    }
+
+    {
+        let prefs = prefs.clone();
+        let weak = weak.clone();
+        ui.on_set_quality(move |value| {
+            let quality = normalize_quality(value.as_str()).to_string();
+            if let Ok(mut prefs) = prefs.lock() {
+                prefs.quality = quality.clone();
+                save_prefs(&prefs);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_quality(quality.clone().into());
+                ui.set_status_text(
+                    format!("播放音质：{}（下一首生效）", quality_label(&quality)).into(),
+                );
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.on_set_log_level(move |value| {
+            let level = value.to_string();
+            match logger::set_level(&level) {
+                Ok(()) => {
+                    let _ = fs::write(paths::data_dir().join("log-level"), &level);
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_log_level(level.clone().into());
+                        ui.set_status_text(format!("日志级别：{level}").into());
+                    }
+                }
+                Err(error) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_status_text(error.into());
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.on_open_log_folder(move || {
+            if let Err(error) = logger::open_folder() {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text(error.into());
+                }
+            }
+        });
     }
 
     {
@@ -777,8 +1293,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let player = player.clone();
         let lyrics = lyrics.clone();
         let generation = generation.clone();
+        let prefs = prefs.clone();
         ui.on_next(move || {
-            play_relative(1, &runtime, &state, &weak, &audio, &player, &lyrics, &generation);
+            play_relative(1, &runtime, &state, &weak, &audio, &player, &lyrics, &generation, &prefs);
         });
     }
 
@@ -790,8 +1307,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let player = player.clone();
         let lyrics = lyrics.clone();
         let generation = generation.clone();
+        let prefs = prefs.clone();
         ui.on_prev(move || {
-            play_relative(-1, &runtime, &state, &weak, &audio, &player, &lyrics, &generation);
+            play_relative(-1, &runtime, &state, &weak, &audio, &player, &lyrics, &generation, &prefs);
         });
     }
 
@@ -822,6 +1340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let player = player.clone();
         let generation = generation.clone();
+        let prefs = prefs.clone();
         let timer = Timer::default();
         timer.start(TimerMode::Repeated, Duration::from_millis(400), move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -833,6 +1352,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ui.set_progress(snapshot.position.min(duration));
+            if snapshot.loaded || snapshot.error.is_some() {
+                ui.set_loading(false);
+            }
             ui.set_playing(snapshot.playing);
             let lines = lyrics.lock().ok().map(|lines| lines.clone()).unwrap_or_default();
             if !lines.is_empty() {
@@ -848,7 +1370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(mut snap) = audio.snapshot.lock() {
                     snap.ended = false;
                 }
-                play_relative(1, &runtime, &state, &weak, &audio, &player, &lyrics, &generation);
+                play_relative(1, &runtime, &state, &weak, &audio, &player, &lyrics, &generation, &prefs);
             }
         });
         std::mem::forget(timer);
@@ -868,6 +1390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_logged_in(true);
                         ui.set_login_open(false);
                         ui.set_account_name(account.nickname.into());
+                        ui.set_account_id(account.user_id.into());
                     });
                     load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
                     load_library(&task_runtime, state.clone(), weak.clone(), catalog);

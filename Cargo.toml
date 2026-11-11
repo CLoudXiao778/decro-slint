@@ -1,6 +1,6 @@
 [package]
 name = "decro-slint"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Decro Slint portable client"
 
@@ -11,6 +11,9 @@ path = "src/main.rs"
 [build-dependencies]
 slint-build = "1.18"
 cc = "1"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [dependencies]
 slint = { version = "1.18", default-features = false, features = ["backend-winit", "renderer-software", "compat-1-2", "std", "accessibility"] }

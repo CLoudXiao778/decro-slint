@@ -37,4 +37,22 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/libnetease/src");
 
     slint_build::compile("ui/app.slint").expect("failed to compile Slint UI");
+    embed_windows_icon();
 }
+
+#[cfg(windows)]
+fn embed_windows_icon() {
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+    if std::path::Path::new("assets/icon.ico").exists() {
+        let mut resource = winres::WindowsResource::new();
+        resource.set_icon("assets/icon.ico");
+        resource.set("ProductName", "Decro Slint");
+        resource.set("FileDescription", "Decro Slint portable client");
+        if let Err(error) = resource.compile() {
+            println!("cargo:warning=failed to embed Windows icon: {error}");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_icon() {}
