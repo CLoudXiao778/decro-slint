@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- 新增内存诊断日志：startup / periodic / minimize / restored，记录单进程 working set 与 private bytes，格式与 Tauri 版对齐，便于长跑对比
+- 最小化时调用 Windows `EmptyWorkingSet` 回收工作集；后台且未播放时、启动空闲后也各回收一次（8 秒节流）
+- `EmptyWorkingSet` 只把页面移出工作集，不改变私有内存，恢复后按需缺页回来
+- 继续包含 0.3.1 的最小化恢复整窗重绘修复、0.3.0 的媒体键/队列/歌手专辑页等功能
+
 ## 0.3.1
 
 - 修复 Windows 最小化后恢复窗口时只显示局部 UI、其余区域透明的问题

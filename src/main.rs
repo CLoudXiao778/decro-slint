@@ -4,6 +4,7 @@ mod auth;
 mod libnetease;
 mod logger;
 mod media;
+mod memory;
 mod netease;
 mod paths;
 mod proxy;
@@ -497,6 +498,8 @@ fn blurred_backdrop(path: &std::path::Path) -> Option<Image> {
 
 static STATUS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WINDOW_RESTORED: AtomicBool = AtomicBool::new(false);
+static WINDOW_MINIMIZED: AtomicBool = AtomicBool::new(false);
+static WINDOW_BACKGROUNDED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(windows)]
 fn watch_window_restore() {
@@ -517,6 +520,12 @@ fn watch_window_restore() {
             loop {
                 let minimized = unsafe { IsIconic(hwnd) }.as_bool();
                 let foreground = unsafe { GetForegroundWindow() } == hwnd;
+                if !was_minimized && minimized {
+                    WINDOW_MINIMIZED.store(true, Ordering::Relaxed);
+                }
+                if was_foreground && !foreground {
+                    WINDOW_BACKGROUNDED.store(true, Ordering::Relaxed);
+                }
                 if (was_minimized && !minimized)
                     || (!was_foreground && foreground && !minimized)
                 {
@@ -1503,17 +1512,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = weak.clone();
         let restore_timer = Timer::default();
         restore_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
-            if !WINDOW_RESTORED.swap(false, Ordering::Relaxed) {
-                return;
+            let ui = weak.upgrade();
+            if WINDOW_MINIMIZED.swap(false, Ordering::Relaxed) {
+                memory::trim_working_set("minimize", "info");
             }
-            if let Some(ui) = weak.upgrade() {
-                // Slint's software renderer can keep a stale partial frame after
-                // restoring a minimized window on Windows. Changing a full-window
-                // overlay forces it to repaint every pixel.
-                ui.set_repaint_nudge(!ui.get_repaint_nudge());
+            if WINDOW_BACKGROUNDED.swap(false, Ordering::Relaxed) {
+                if ui.as_ref().is_some_and(|ui| !ui.get_playing()) {
+                    memory::trim_working_set("background", "debug");
+                }
+            }
+            if WINDOW_RESTORED.swap(false, Ordering::Relaxed) {
+                if let Some(ui) = &ui {
+                    // Slint's software renderer can keep a stale partial frame after
+                    // restoring a minimized window on Windows. Changing a full-window
+                    // overlay forces it to repaint every pixel.
+                    ui.set_repaint_nudge(!ui.get_repaint_nudge());
+                }
+                memory::log_stats("restored", "info");
             }
         });
         std::mem::forget(restore_timer);
+    }
+
+    // Memory diagnostics and one idle trim, matching the Tauri build's logs.
+    {
+        let weak = weak.clone();
+        let stats_timer = Timer::default();
+        stats_timer.start(TimerMode::Repeated, Duration::from_secs(300), move || {
+            memory::log_stats("periodic", "debug");
+        });
+        std::mem::forget(stats_timer);
+
+        let handle = weak.clone();
+        Timer::single_shot(Duration::from_millis(2500), move || {
+            memory::log_stats("startup", "info");
+            if let Some(ui) = handle.upgrade() {
+                if !ui.get_playing() {
+                    memory::trim_working_set("idle", "debug");
+                }
+            }
+        });
     }
 
     ui.set_status_text("正在检查登录状态…".into());

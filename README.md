@@ -21,6 +21,7 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
 - 资料库支持新建歌单、通过歌单 ID/链接添加歌单
 - 上次播放队列/曲目/进度恢复，音量持久化
 - Windows 系统媒体控件（SMTC）：媒体键、系统媒体浮层、任务栏封面与播放状态
+- 内存诊断日志与最小化工作集回收（startup / periodic / minimize / restored）
 - 全部数据位于 exe 同目录 `data/`，便携升级只覆盖 exe
 
 ## data 目录
