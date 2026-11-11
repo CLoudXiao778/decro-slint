@@ -1394,22 +1394,22 @@ export component AppWindow inherits Window {
 
                         SearchField {
                             text <=> root.search-text;
-                            placeholder: "搜索歌曲、歌手、歌单";
+                            placeholder: "搜索歌曲、歌手、歌单、专辑";
                             accepted => { root.search(root.search-text); }
                         }
 
-                        if root.search-text.is-empty : Text {
-                            text: "输入关键词，搜索网易云音乐。";
-                            color: #77777d;
-                            font-size: 13px;
-                        }
-
-                        if !root.search-text.is-empty : HorizontalLayout {
+                        HorizontalLayout {
                             spacing: 8px;
                             PillButton { label: "歌曲"; width: 84px; primary: root.search-kind == "song"; clicked => { root.search-kind = "song"; } }
                             PillButton { label: "歌单"; width: 84px; primary: root.search-kind == "playlist"; clicked => { root.search-kind = "playlist"; } }
                             PillButton { label: "歌手"; width: 84px; primary: root.search-kind == "artist"; clicked => { root.search-kind = "artist"; } }
                             PillButton { label: "专辑"; width: 84px; primary: root.search-kind == "album"; clicked => { root.search-kind = "album"; } }
+                        }
+
+                        if root.search-text.is-empty : Text {
+                            text: "选择分类后输入关键词，搜索网易云音乐。";
+                            color: #77777d;
+                            font-size: 13px;
                         }
 
                         if root.search-kind == "song" && root.search-tracks.length > 0 : VerticalLayout {
@@ -1768,7 +1768,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.3.4 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.3.5 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -1868,11 +1868,13 @@ export component AppWindow inherits Window {
             height: 2px;
             border-radius: 1px;
             background: #ffffff24;
+            clip: true;
             Rectangle {
                 width: root.duration > 0 ? min(parent.width, parent.width * max(0, min(1, root.progress / root.duration))) : 0px;
                 height: 100%;
                 border-radius: 1px;
                 background: #ff645d;
+                animate width { duration: 380ms; easing: linear; }
             }
         }
     }

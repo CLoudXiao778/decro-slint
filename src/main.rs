@@ -106,23 +106,46 @@ fn spawn_audio() -> AudioHandle {
         let mut loaded = false;
         loop {
             match rx.recv_timeout(Duration::from_millis(120)) {
-                Ok(AudioCmd::Load(bytes, duration, resume_at)) => {
+                Ok(AudioCmd::Load(bytes, _duration, resume_at)) => {
                     sink.stop();
                     loaded = false;
                     match rodio::Decoder::new(Cursor::new(bytes)) {
                         Ok(decoder) => {
+                            // The metadata duration can describe the full song even
+                            // when the CDN returns a 30 s VIP/copyright preview.
+                            // Seeking past the decoded stream makes the sink end at
+                            // once, and the auto-next timer then starts a different
+                            // song. Clamp against the real decoded duration.
+                            let decoded_duration = rodio::Source::total_duration(&decoder)
+                                .map(|value| value.as_secs_f32());
+                            // With an unknown decoded length, do not seek: the
+                            // stream may be a short preview and would auto-next.
+                            let safe_end = decoded_duration.unwrap_or(0.0);
+                            let resume_from = if resume_at > 0.5 && resume_at + 3.0 < safe_end {
+                                resume_at
+                            } else {
+                                0.0
+                            };
+                            if resume_at > 0.5 && resume_from == 0.0 {
+                                logger::log(
+                                    "info",
+                                    "audio",
+                                    &format!(
+                                        "resume clamped requested={resume_at:.1}s decoded={safe_end:.1}s"
+                                    ),
+                                );
+                            }
                             sink.append(decoder);
                             sink.play();
-                            let resumed = resume_at > 0.5
-                                && sink.try_seek(Duration::from_secs_f32(resume_at)).is_ok();
+                            let resumed = resume_from > 0.5
+                                && sink.try_seek(Duration::from_secs_f32(resume_from)).is_ok();
                             loaded = true;
                             if let Ok(mut state) = snap.lock() {
-                                state.position = if resumed { resume_at } else { 0.0 };
+                                state.position = if resumed { resume_from } else { 0.0 };
                                 state.loaded = true;
                                 state.ended = false;
                                 state.error = None;
                             }
-                            let _ = duration;
                         }
                         Err(error) => {
                             if let Ok(mut state) = snap.lock() {
@@ -966,6 +989,14 @@ fn start_track(
         };
         (resume_at, player.queue.clone(), player.index as i32)
     };
+    logger::log(
+        "info",
+        "play",
+        &format!(
+            "start id={} title={} index={} resume={resume_at:.1}s",
+            track.id, track.name, queue_index
+        ),
+    );
     media::update_track(&track.name, &track.artist, &track.album, None);
     media::update_playback(true);
     if remember_local_recent(&track) {
@@ -1641,6 +1672,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             0.0
         };
+        logger::log(
+            "info",
+            "restore",
+            &format!(
+                "id={} title={} index={} position={resume_position:.1}s",
+                track.id, track.name, saved.index
+            ),
+        );
         if let Ok(mut player) = player.lock() {
             player.queue = saved.queue;
             player.index = saved.index;
