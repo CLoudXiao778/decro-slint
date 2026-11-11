@@ -526,6 +526,82 @@ fn parse_recent(value: &Value) -> Vec<TrackDto> {
     .unwrap_or_default()
 }
 
+fn parse_recent_song_list(value: &Value) -> Vec<TrackDto> {
+    let list = value
+        .get("data")
+        .and_then(|data| {
+            data.get("list")
+                .and_then(Value::as_array)
+                .or_else(|| data.as_array())
+        })
+        .or_else(|| value.get("list").and_then(Value::as_array));
+    list.map(|items| {
+        items
+            .iter()
+            .filter_map(|item| {
+                let song = item
+                    .get("song")
+                    .or_else(|| item.get("data"))
+                    .or_else(|| item.get("track"))
+                    .unwrap_or(item);
+                normalize_song(song)
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Recent play history: prefer the chronological endpoint, fall back to the
+/// all-time play ranking (the week-only ranking is too short for this list).
+pub async fn recent_played(state: &AppState) -> Result<Vec<TrackDto>, String> {
+    match get_json(
+        state,
+        "/api/play-record/song/list",
+        &[("limit", "100".to_string())],
+    )
+    .await
+    {
+        Ok(value) => {
+            let list = parse_recent_song_list(&value);
+            crate::logger::log(
+                "debug",
+                "recent",
+                &format!("play-record/song/list count={}", list.len()),
+            );
+            if !list.is_empty() {
+                return Ok(list);
+            }
+        }
+        Err(error) => crate::logger::log(
+            "debug",
+            "recent",
+            &format!("play-record/song/list failed: {error}"),
+        ),
+    }
+
+    let uid = state
+        .account()
+        .ok_or_else(|| "请先登录网易云".to_string())?
+        .user_id;
+    let value = get_json(
+        state,
+        "/api/v1/play/record",
+        &[
+            ("uid", uid),
+            ("type", "0".to_string()),
+            ("limit", "100".to_string()),
+        ],
+    )
+    .await?;
+    let list = parse_recent(&value);
+    crate::logger::log(
+        "debug",
+        "recent",
+        &format!("user/record allData count={}", list.len()),
+    );
+    Ok(list)
+}
+
 pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
     let recommended_query = [("limit", "12".to_string())];
     let new_songs_query = [("limit", "12".to_string())];
@@ -564,11 +640,6 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
     if let Some(account) = state.account() {
         let uid = account.user_id;
         let daily_query = [("limit", "30".to_string())];
-        let recent_query = [
-            ("uid", uid.clone()),
-            ("type", "1".to_string()),
-            ("limit", "60".to_string()),
-        ];
         let playlists_query = [
             ("uid", uid),
             ("limit", "100".to_string()),
@@ -576,15 +647,15 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
         ];
         let (daily_result, recent_result, playlists_result) = tokio::join!(
             get_json(state, "/api/v3/discovery/recommend/songs", &daily_query,),
-            get_json(state, "/api/v1/play/record", &recent_query),
+            recent_played(state),
             get_json(state, "/api/user/playlist", &playlists_query),
         );
 
         if let Ok(value) = daily_result {
             daily = parse_daily(&value);
         }
-        if let Ok(value) = recent_result {
-            recent = parse_recent(&value);
+        if let Ok(list) = recent_result {
+            recent = list;
         }
         if let Ok(value) = playlists_result {
             user_playlists = playlists_from(value.get("playlist"));
@@ -748,14 +819,9 @@ pub async fn library_data(state: &AppState) -> Result<LibraryData, String> {
         ("limit", "100".to_string()),
         ("offset", "0".to_string()),
     ];
-    let recent_query = [
-        ("uid", uid),
-        ("type", "1".to_string()),
-        ("limit", "60".to_string()),
-    ];
     let (playlists_result, recent_result) = tokio::join!(
         get_json(state, "/api/user/playlist", &playlists_query),
-        get_json(state, "/api/v1/play/record", &recent_query),
+        recent_played(state),
     );
 
     let mut errors = Vec::new();
@@ -767,7 +833,7 @@ pub async fn library_data(state: &AppState) -> Result<LibraryData, String> {
         }
     };
     let recent = match recent_result {
-        Ok(value) => parse_recent(&value),
+        Ok(list) => list,
         Err(error) => {
             errors.push(format!("最近播放：{error}"));
             Vec::new()

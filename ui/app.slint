@@ -1,4 +1,4 @@
-import { ListView, ScrollView, Palette } from "std-widgets.slint";
+import { ScrollView, Palette } from "std-widgets.slint";
 
 export struct TrackItem {
     id: string,
@@ -160,7 +160,7 @@ component FeatureCard inherits Rectangle {
         spacing: 8px;
         HorizontalLayout {
             spacing: 7px;
-            alignment: center;
+            cross-axis-alignment: center;
             Glyph {
                 source: @image-url("../assets/icons/sparkles.svg");
                 glyph-size: 13px;
@@ -429,12 +429,13 @@ component SearchField inherits Rectangle {
         padding-left: 22px;
         padding-right: 14px;
         spacing: 12px;
-        alignment: center;
+        cross-axis-alignment: center;
         Glyph { source: @image-url("../assets/icons/search.svg"); glyph-size: 20px; tint: #8e8e93; }
         Rectangle {
             horizontal-stretch: 1;
             height: 34px;
             background: transparent;
+            TouchArea { clicked => { input.focus(); } }
             if root.text.is-empty : Text {
                 x: 0; y: 0; width: 100%; height: 100%;
                 text: root.placeholder;
@@ -459,6 +460,12 @@ component SearchField inherits Rectangle {
             height: 28px;
             clicked => { root.text = ""; }
         }
+        PillButton {
+            label: "搜索";
+            width: 68px;
+            primary: true;
+            clicked => { root.accepted(); }
+        }
     }
 }
 
@@ -477,6 +484,7 @@ component TextField inherits Rectangle {
         Rectangle {
             horizontal-stretch: 1;
             background: transparent;
+            TouchArea { clicked => { input.focus(); } }
             if root.text.is-empty : Text {
                 x: 0; y: 0; width: 100%; height: 100%;
                 text: root.placeholder;
@@ -730,12 +738,12 @@ export component AppWindow inherits Window {
                 padding-left: 18px;
                 padding-right: 10px;
                 spacing: 14px;
-                alignment: center;
+                cross-axis-alignment: center;
 
                 HorizontalLayout {
                     width: 184px;
                     spacing: 9px;
-                    alignment: center;
+                    cross-axis-alignment: center;
                     Image {
                         width: 27px;
                         height: 27px;
@@ -774,7 +782,7 @@ export component AppWindow inherits Window {
                         padding-left: 10px;
                         padding-right: 8px;
                         spacing: 8px;
-                        alignment: center;
+                        cross-axis-alignment: center;
                         Glyph { source: @image-url("../assets/icons/search.svg"); glyph-size: 15px; tint: #8e8e93; }
                         Text { horizontal-stretch: 1; text: "搜索歌曲、歌单或命令"; color: #8e8e93; font-size: 11px; vertical-alignment: center; overflow: elide; }
                         Rectangle {
@@ -801,7 +809,7 @@ export component AppWindow inherits Window {
                         padding-left: 3px;
                         padding-right: 7px;
                         spacing: 7px;
-                        alignment: center;
+                        cross-axis-alignment: center;
                         Rectangle {
                             width: 24px;
                             height: 24px;
@@ -885,6 +893,7 @@ export component AppWindow inherits Window {
                     padding-left: 16px;
                     padding-right: 16px;
                     spacing: 3px;
+                    cross-axis-alignment: center;
                     NavIcon {
                         icon: @image-url("../assets/icons/home.svg");
                         active: root.page == "home" || root.page == "detail";
@@ -942,6 +951,7 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 16px;
+                            cross-axis-alignment: center;
                             VerticalLayout {
                                 spacing: 4px;
                                 Text { text: "主页"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
@@ -1011,7 +1021,13 @@ export component AppWindow inherits Window {
 
                         if root.recent-tracks.length > 0 : VerticalLayout {
                             spacing: 12px;
-                            Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                cross-axis-alignment: center;
+                                Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                                Rectangle { horizontal-stretch: 1; }
+                                PillButton { label: "查看全部"; width: 80px; clicked => { root.nav("recent"); } }
+                            }
                             Flickable {
                                 height: 236px;
                                 content-width: root.recent-tracks.length * 192px;
@@ -1036,6 +1052,7 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 16px;
+                            cross-axis-alignment: center;
                             Text { text: "推荐"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
                             Rectangle { horizontal-stretch: 1; }
                             Rectangle {
@@ -1047,7 +1064,13 @@ export component AppWindow inherits Window {
 
                         if root.recent-tracks.length > 0 : VerticalLayout {
                             spacing: 12px;
-                            Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                cross-axis-alignment: center;
+                                Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                                Rectangle { horizontal-stretch: 1; }
+                                PillButton { label: "查看全部"; width: 80px; clicked => { root.nav("recent"); } }
+                            }
                             Flickable {
                                 height: 236px;
                                 content-width: root.recent-tracks.length * 192px;
@@ -1120,6 +1143,7 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 16px;
+                            cross-axis-alignment: center;
                             Text { text: "资料库"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
                             Rectangle { horizontal-stretch: 1; }
                             Rectangle {
@@ -1138,7 +1162,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 padding: 14px;
                                 spacing: 14px;
-                                alignment: center;
+                                cross-axis-alignment: center;
                                 Rectangle {
                                     width: 52px; height: 52px; border-radius: 26px; background: #c92027;
                                     Glyph { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: @image-url("../assets/icons/user.svg"); glyph-size: 24px; tint: #fff; }
@@ -1158,8 +1182,8 @@ export component AppWindow inherits Window {
                         if root.logged-in && root.library-playlists.length > 0 : VerticalLayout {
                             spacing: 12px;
                             Text { text: "我的歌单"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
-                            ListView {
-                                min-height: 360px;
+                            VerticalLayout {
+                                spacing: 6px;
                                 for item in root.library-playlists : PlaylistRow {
                                     item: item;
                                     clicked => { root.open-playlist(item.id); }
@@ -1170,8 +1194,8 @@ export component AppWindow inherits Window {
                         if root.logged-in && root.library-tracks.length > 0 : VerticalLayout {
                             spacing: 12px;
                             Text { text: "最近播放"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
-                            ListView {
-                                min-height: 360px;
+                            VerticalLayout {
+                                spacing: 6px;
                                 for track in root.library-tracks : MediaRow {
                                     item: track;
                                     current: track.id == root.current-id;
@@ -1197,6 +1221,7 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 16px;
+                            cross-axis-alignment: center;
                             Text { text: "搜索"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
                             Rectangle { horizontal-stretch: 1; }
                             Rectangle {
@@ -1221,8 +1246,8 @@ export component AppWindow inherits Window {
                         if root.search-tracks.length > 0 : VerticalLayout {
                             spacing: 10px;
                             Text { text: "歌曲"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
-                            ListView {
-                                min-height: 320px;
+                            VerticalLayout {
+                                spacing: 6px;
                                 for track in root.search-tracks : MediaRow {
                                     item: track;
                                     current: track.id == root.current-id;
@@ -1244,6 +1269,43 @@ export component AppWindow inherits Window {
                                     item: item;
                                     clicked => { root.open-playlist(item.id); }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == "recent" : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 30px;
+                        padding-bottom: 140px;
+                        spacing: 16px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            cross-axis-alignment: center;
+                            IconButton {
+                                icon: @image-url("../assets/icons/arrow-left.svg");
+                                icon-size: 18px;
+                                width: 38px;
+                                height: 38px;
+                                border-radius: 19px;
+                                background: #ffffff0d;
+                                clicked => { root.nav("home"); }
+                            }
+                            Text { text: "最近播放"; color: #f5f5f7; font-size: 34px; font-weight: 700; }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        if root.recent-tracks.length == 0 : Text {
+                            text: "还没有最近播放";
+                            color: #8e8e93;
+                            font-size: 13px;
+                        }
+                        VerticalLayout {
+                            spacing: 6px;
+                            for track in root.recent-tracks : MediaRow {
+                                item: track;
+                                current: track.id == root.current-id;
+                                clicked => { root.play-track(track.id); }
                             }
                         }
                     }
@@ -1307,23 +1369,25 @@ export component AppWindow inherits Window {
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     wrap: word-wrap;
-                                    max-height: 36px;
+                                    height: 40px;
                                     overflow: elide;
                                 }
-                                Rectangle {
-                                    width: 96px;
-                                    height: 64px;
-                                    border-radius: 23px;
-                                    background: detail-play-tap.has-hover ? #ffffff : #f5f4f2;
-                                    drop-shadow-color: #00000066;
-                                    drop-shadow-blur: 24px;
-                                    drop-shadow-offset-y: 8px;
-                                    Glyph { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: @image-url("../assets/icons/play-fill.svg"); glyph-size: 24px; tint: #111111; }
-                                    detail-play-tap := TouchArea {
-                                        clicked => {
-                                            if root.detail-first-id != "" {
-                                                root.play-detail(root.detail-first-id);
-                                            }
+                            }
+                            Rectangle {
+                                x: (parent.width - 96px) / 2;
+                                y: 318px;
+                                width: 96px;
+                                height: 64px;
+                                border-radius: 23px;
+                                background: detail-play-tap.has-hover ? #ffffff : #f5f4f2;
+                                drop-shadow-color: #00000066;
+                                drop-shadow-blur: 24px;
+                                drop-shadow-offset-y: 8px;
+                                Glyph { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: @image-url("../assets/icons/play-fill.svg"); glyph-size: 24px; tint: #111111; }
+                                detail-play-tap := TouchArea {
+                                    clicked => {
+                                        if root.detail-first-id != "" {
+                                            root.play-detail(root.detail-first-id);
                                         }
                                     }
                                 }
@@ -1339,8 +1403,8 @@ export component AppWindow inherits Window {
                                 font-size: 20px;
                                 font-weight: 700;
                             }
-                            ListView {
-                                min-height: 560px;
+                            VerticalLayout {
+                                spacing: 6px;
                                 for track in root.detail-tracks : DetailRow {
                                     item: track;
                                     current: track.id == root.current-id;
@@ -1391,7 +1455,7 @@ export component AppWindow inherits Window {
                                     HorizontalLayout {
                                         padding: 14px;
                                         spacing: 14px;
-                                        alignment: center;
+                                        cross-axis-alignment: center;
                                         Rectangle {
                                             width: 56px; height: 56px; border-radius: 28px;
                                             background: @linear-gradient(135deg, #7e838d, #3c4149);
@@ -1438,7 +1502,7 @@ export component AppWindow inherits Window {
                                         padding-left: 16px;
                                         padding-right: 16px;
                                         spacing: 12px;
-                                        alignment: center;
+                                        cross-axis-alignment: center;
                                         VerticalLayout {
                                             horizontal-stretch: 1;
                                             spacing: 3px;
@@ -1450,7 +1514,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.2.1 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.2.2 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -1478,7 +1542,7 @@ export component AppWindow inherits Window {
             padding-left: 10px;
             padding-right: 22px;
             spacing: 14px;
-            alignment: center;
+            cross-axis-alignment: center;
 
             Rectangle {
                 width: 62px;
@@ -1610,6 +1674,7 @@ export component AppWindow inherits Window {
                 spacing: 13px;
                 HorizontalLayout {
                     spacing: 8px;
+                    cross-axis-alignment: center;
                     Text { text: "登录网易云音乐"; color: #f5f5f7; font-size: 22px; font-weight: 700; horizontal-stretch: 1; vertical-alignment: center; }
                     IconButton {
                         icon: @image-url("../assets/icons/close.svg");
@@ -1695,7 +1760,7 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 height: 44px;
                 spacing: 12px;
-                alignment: center;
+                cross-axis-alignment: center;
                 Rectangle {
                     width: 36px; height: 36px; border-radius: 18px;
                     background: player-close-tap.has-hover ? #ffffff1c : #ffffff0d;
@@ -1725,11 +1790,12 @@ export component AppWindow inherits Window {
                 vertical-stretch: 1;
                 padding-top: 10px; padding-bottom: 10px; padding-left: 28px; padding-right: 28px;
                 spacing: 70px;
-                alignment: center;
+                cross-axis-alignment: center;
 
                 VerticalLayout {
                     width: 40%;
                     alignment: center;
+                    cross-axis-alignment: center;
                     spacing: 14px;
                     Rectangle {
                         width: 360px;
@@ -1815,10 +1881,14 @@ export component AppWindow inherits Window {
                         color: #ffffff57;
                         font-size: 10px;
                     }
-                    PillButton {
-                        label: "打开歌词";
-                        width: 104px;
-                        clicked => { root.lyrics-mode = true; }
+                    HorizontalLayout {
+                        spacing: 0px;
+                        PillButton {
+                            label: "打开歌词";
+                            width: 104px;
+                            clicked => { root.lyrics-mode = true; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                 }
             }
@@ -1831,7 +1901,7 @@ export component AppWindow inherits Window {
                 Text { text: root.current-artist; color: #ffffff9e; font-size: 16px; }
                 HorizontalLayout {
                     spacing: 10px;
-                    alignment: center;
+                    cross-axis-alignment: center;
                     Rectangle { horizontal-stretch: 1; }
                     Text { text: root.lyric-follow ? "滚轮或拖动查看，点击歌词跳转" : "已暂停自动跟随"; color: #ffffff5c; font-size: 10px; vertical-alignment: center; }
                     if !root.lyric-follow : PillButton {
@@ -1894,11 +1964,12 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     height: 68px;
                     spacing: 8px;
-                    alignment: center;
+                    cross-axis-alignment: center;
                     HorizontalLayout {
                         width: 220px;
                         spacing: 6px;
                         alignment: start;
+                        cross-axis-alignment: center;
                         RoundIconButton {
                             icon: @image-url("../assets/icons/lyrics.svg");
                             icon-size: 18px;
@@ -1910,7 +1981,7 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                     HorizontalLayout {
                         spacing: 22px;
-                        alignment: center;
+                        cross-axis-alignment: center;
                         RoundIconButton {
                             icon: @image-url("../assets/icons/prev.svg");
                             icon-size: 22px;
@@ -1944,6 +2015,7 @@ export component AppWindow inherits Window {
                         width: 220px;
                         spacing: 8px;
                         alignment: end;
+                        cross-axis-alignment: center;
                         Glyph { source: @image-url("../assets/icons/volume.svg"); glyph-size: 18px; tint: #ffffff80; }
                         VolumeBar {
                             value <=> root.volume;

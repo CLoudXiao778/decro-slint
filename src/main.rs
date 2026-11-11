@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use std::rc::Rc;
@@ -552,6 +552,74 @@ async fn fetch_cover(state: &AppState, url: String) -> Option<PathBuf> {
     Some(path)
 }
 
+static LOCAL_RECENT: OnceLock<Arc<Mutex<Vec<netease::TrackDto>>>> = OnceLock::new();
+
+fn load_local_recent() -> Vec<netease::TrackDto> {
+    fs::read_to_string(paths::data_dir().join("recent-played.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn local_recent() -> &'static Arc<Mutex<Vec<netease::TrackDto>>> {
+    LOCAL_RECENT.get_or_init(|| Arc::new(Mutex::new(load_local_recent())))
+}
+
+fn persist_local_recent(list: &[netease::TrackDto]) {
+    if let Ok(text) = serde_json::to_string(list) {
+        let _ = fs::write(paths::data_dir().join("recent-played.json"), text);
+    }
+}
+
+fn remember_local_recent(track: &netease::TrackDto) -> bool {
+    let Ok(mut list) = local_recent().lock() else {
+        return false;
+    };
+    if list.first().is_some_and(|first| first.id == track.id) {
+        return false;
+    }
+    list.retain(|item| item.id != track.id);
+    list.insert(0, track.clone());
+    list.truncate(200);
+    persist_local_recent(&list);
+    true
+}
+
+fn replace_local_recent(tracks: Vec<netease::TrackDto>) -> Vec<netease::TrackDto> {
+    let mut list = tracks;
+    list.truncate(200);
+    if let Ok(mut current) = local_recent().lock() {
+        *current = list.clone();
+    }
+    persist_local_recent(&list);
+    list
+}
+
+fn merge_recent(
+    local: &[netease::TrackDto],
+    remote: &[netease::TrackDto],
+) -> Vec<netease::TrackDto> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    for track in local.iter().chain(remote.iter()) {
+        if seen.insert(track.id.clone()) {
+            merged.push(track.clone());
+        }
+    }
+    merged
+}
+
+fn short_description(text: &str) -> String {
+    let text = text.trim().replace(['\r', '\n'], " ");
+    let mut chars = text.chars();
+    let short: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
 fn load_saved_player() -> Option<SavedPlayer> {
     let text = fs::read_to_string(paths::data_dir().join("last-playback.json")).ok()?;
     let saved: SavedPlayer = serde_json::from_str(&text).ok()?;
@@ -607,6 +675,28 @@ fn start_track(
     track: netease::TrackDto,
 ) {
     let request = generation.fetch_add(1, Ordering::Relaxed) + 1;
+    if remember_local_recent(&track) {
+        let local = local_recent()
+            .lock()
+            .map(|list| list.clone())
+            .unwrap_or_default();
+        if !local.is_empty() {
+            let recent_tracks = local.clone();
+            let recent_ui = ui.clone();
+            update_ui(&recent_ui, move |ui| {
+                ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(
+                    track_items_for_ui(&local),
+                ))));
+            });
+            runtime.spawn(load_track_covers(
+                state.clone(),
+                recent_ui,
+                TrackTarget::Recent,
+                recent_tracks,
+                80,
+            ));
+        }
+    }
     if let Ok(mut snapshot) = audio.snapshot.lock() {
         snapshot.loaded = false;
         snapshot.playing = false;
@@ -805,7 +895,13 @@ fn load_home(
 ) {
     runtime.spawn(async move {
         match netease::home_feed(&state).await {
-            Ok(home) => {
+            Ok(mut home) => {
+                let local = local_recent()
+                    .lock()
+                    .map(|list| list.clone())
+                    .unwrap_or_default();
+                home.recent = merge_recent(&local, &home.recent);
+                home.recent = replace_local_recent(home.recent.clone());
                 if let Ok(mut catalog) = catalog.lock() {
                     catalog.recent = home.recent.clone();
                     catalog.daily = home.daily.clone();
@@ -860,7 +956,8 @@ fn load_home(
                             tint: color_for(&playlist.id),
                         });
                     }
-                    ui.set_status_text(format!("已加载 {recommended_count} 个推荐歌单").into());
+                    let _ = recommended_count;
+                    ui.set_status_text("".into());
                 });
 
                 if let Some(track) = daily_first_cover {
@@ -943,7 +1040,12 @@ fn load_library(
 ) {
     runtime.spawn(async move {
         match netease::library_data(&state).await {
-            Ok(library) => {
+            Ok(mut library) => {
+                let local = local_recent()
+                    .lock()
+                    .map(|list| list.clone())
+                    .unwrap_or_default();
+                library.recent = merge_recent(&local, &library.recent);
                 if let Ok(mut catalog) = catalog.lock() {
                     catalog.library_playlists = library.playlists.clone();
                     catalog.library_recent = library.recent.clone();
@@ -958,7 +1060,8 @@ fn load_library(
                     ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(
                         track_items_for_ui(&library.recent),
                     ))));
-                    ui.set_status_text(format!("资料库：{playlist_count} 个歌单").into());
+                    let _ = playlist_count;
+                    ui.set_status_text("".into());
                 });
                 tokio::spawn(load_track_covers(
                     state.clone(),
@@ -1049,6 +1152,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_log_level(log_level.into());
     ui.set_status_text("正在检查登录状态…".into());
     ui.set_login_open(true);
+
+    let initial_local = local_recent()
+        .lock()
+        .map(|list| list.clone())
+        .unwrap_or_default();
+    if !initial_local.is_empty() {
+        if let Ok(mut catalog) = catalog.lock() {
+            catalog.recent = initial_local.clone();
+        }
+        ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(
+            track_items_for_ui(&initial_local),
+        ))));
+        let cover_tracks = initial_local.clone();
+        runtime.spawn(load_track_covers(
+            state.clone(),
+            weak.clone(),
+            TrackTarget::Recent,
+            cover_tracks,
+            80,
+        ));
+    }
 
     if let Some(saved) = load_saved_player() {
         let track = saved.queue[saved.index].clone();
@@ -1277,9 +1401,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_search_playlists(ModelRc::from(Rc::new(VecModel::from(
                                 playlist_items_for_ui(&data.playlists),
                             ))));
-                            ui.set_status_text(
-                                format!("搜索到 {} 首歌曲", data.songs.len()).into(),
-                            );
+                            let _ = data.songs.len();
+                            ui.set_status_text("".into());
                         });
                         tokio::spawn(load_track_covers(
                             state.clone(),
@@ -1322,7 +1445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let track_covers = playlist.tracks.clone();
                         let title = playlist.name.clone();
                         let meta = format!("{} · {} 首", playlist.creator, playlist.track_count);
-                        let description = playlist.description.clone();
+                        let description = short_description(&playlist.description);
                         let cover_tint = color_for(&playlist.id);
                         let cover_endpoint = cover_url(&playlist.cover_url, 500);
                         let first_id = playlist
@@ -1485,7 +1608,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio = audio.clone();
         let prefs = prefs.clone();
         ui.on_play_track(move |id| {
-            let Some((track, context)) = catalog.lock().ok().and_then(|catalog| find_track(&catalog, id.as_str())) else {
+            let Some((track, context)) = catalog
+                .lock()
+                .ok()
+                .and_then(|catalog| find_track(&catalog, id.as_str()))
+                .or_else(|| {
+                    let local = local_recent().lock().ok()?.clone();
+                    local
+                        .iter()
+                        .find(|track| track.id == id.as_str())
+                        .cloned()
+                        .map(|track| (track, local))
+                })
+            else {
                 return;
             };
             let index = context.iter().position(|item| item.id == track.id).unwrap_or(0);
@@ -1765,6 +1900,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             ui.set_progress(snapshot.position.min(duration));
             ui.set_position_text(format_clock(snapshot.position).into());
+            if snapshot.loaded && ui.get_status_text().as_str() == "正在加载音源…" {
+                ui.set_status_text("".into());
+            }
             if snapshot.loaded || snapshot.error.is_some() {
                 ui.set_loading(false);
             }
