@@ -107,6 +107,8 @@ export component AppWindow inherits Window {
     in property <image> qr-image;
     in property <[PlaylistItem]> playlists;
     in property <[TrackItem]> recent-tracks;
+    in property <[PlaylistItem]> library-playlists;
+    in property <[TrackItem]> library-tracks;
     in property <[TrackItem]> new-tracks;
     in property <[TrackItem]> detail-tracks;
     in property <[TrackItem]> search-tracks;
@@ -119,9 +121,9 @@ export component AppWindow inherits Window {
     in property <string> current-quality: "";
     in property <color> current-cover: #c92027;
     in property <bool> playing;
-    in property <float> progress;
+    in-out property <float> progress;
     in property <float> duration;
-    in property <float> volume: 0.7;
+    in-out property <float> volume: 0.7;
     in property <bool> player-open;
     in property <[LyricItem]> lyrics;
     in property <int> lyric-index;
@@ -140,6 +142,7 @@ export component AppWindow inherits Window {
     callback prev();
     callback seek(float);
     callback volume-changed(float);
+    callback volume-released(float);
     callback open-player();
     callback close-player();
 
@@ -150,6 +153,7 @@ export component AppWindow inherits Window {
 
     if root.login-open && !root.logged-in : Rectangle {
         x: 0; y: 0; width: 100%; height: 100%;
+        z: 100;
         background: #000000cc;
         Rectangle {
             width: 390px; height: 520px;
@@ -223,6 +227,7 @@ export component AppWindow inherits Window {
         }
 
         if root.page == "home" : ScrollView {
+            vertical-stretch: 1;
             VerticalLayout {
                 padding: 22px;
                 spacing: 16px;
@@ -254,6 +259,7 @@ export component AppWindow inherits Window {
         }
 
         if root.page == "library" : ScrollView {
+            vertical-stretch: 1;
             VerticalLayout {
                 padding: 22px;
                 spacing: 14px;
@@ -261,7 +267,7 @@ export component AppWindow inherits Window {
                 Text { text: "我的歌单"; color: #f1f1f2; font-size: 22px; font-weight: 650; }
                 ListView {
                     min-height: 260px;
-                    for item in root.playlists : PlaylistCard {
+                    for item in root.library-playlists : PlaylistCard {
                         item: item;
                         clicked => { root.open-playlist(item.id); }
                     }
@@ -269,7 +275,7 @@ export component AppWindow inherits Window {
                 Text { text: "最近播放"; color: #f1f1f2; font-size: 22px; font-weight: 650; }
                 ListView {
                     min-height: 260px;
-                    for track in root.recent-tracks : TrackRow {
+                    for track in root.library-tracks : TrackRow {
                         item: track;
                         clicked => { root.play-track(track.id); }
                     }
@@ -278,6 +284,7 @@ export component AppWindow inherits Window {
         }
 
         if root.page == "search" : ScrollView {
+            vertical-stretch: 1;
             VerticalLayout {
                 padding: 22px;
                 spacing: 14px;
@@ -302,6 +309,7 @@ export component AppWindow inherits Window {
         }
 
         if root.page == "detail" : ScrollView {
+            vertical-stretch: 1;
             VerticalLayout {
                 padding: 22px;
                 spacing: 14px;
@@ -322,6 +330,7 @@ export component AppWindow inherits Window {
         }
 
         if root.page == "settings" : ScrollView {
+            vertical-stretch: 1;
             VerticalLayout {
                 padding: 22px;
                 spacing: 14px;
@@ -357,13 +366,15 @@ export component AppWindow inherits Window {
                 Button { text: root.playing ? "⏸" : "▶"; clicked => { root.toggle-play(); } }
                 Button { text: "⏭"; clicked => { root.next(); } }
                 Slider {
-                    minimum: 0; maximum: root.duration; value: root.progress;
+                    horizontal-stretch: 1;
+                    minimum: 0; maximum: root.duration; value <=> root.progress;
                     changed(value) => { root.seek(value); }
                 }
                 Text { text: root.current-quality; color: #85858a; font-size: 11px; vertical-alignment: center; }
                 Slider {
-                    width: 110px; minimum: 0; maximum: 1; value: root.volume;
+                    width: 110px; minimum: 0; maximum: 1; value <=> root.volume;
                     changed(value) => { root.volume-changed(value); }
+                    released(value) => { root.volume-released(value); }
                 }
                 Button { text: "歌词"; clicked => { root.open-player(); } }
             }
@@ -374,6 +385,7 @@ export component AppWindow inherits Window {
             x: 0; y: 54px; width: root.width; height: root.height - 54px;
             background: #09090b;
             z: 20;
+            TouchArea { }
             VerticalLayout {
                 padding: 24px;
                 spacing: 12px;

@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod auth;
 mod libnetease;
 mod logger;
@@ -8,6 +10,7 @@ mod secure_store;
 mod state;
 
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -85,12 +88,14 @@ fn spawn_audio() -> AudioHandle {
             match rx.recv_timeout(Duration::from_millis(120)) {
                 Ok(AudioCmd::Load(bytes, duration)) => {
                     sink.stop();
+                    loaded = false;
                     match rodio::Decoder::new(Cursor::new(bytes)) {
                         Ok(decoder) => {
                             sink.append(decoder);
                             sink.play();
                             loaded = true;
                             if let Ok(mut state) = snap.lock() {
+                                state.position = 0.0;
                                 state.ended = false;
                                 state.error = None;
                             }
@@ -99,7 +104,8 @@ fn spawn_audio() -> AudioHandle {
                         Err(error) => {
                             if let Ok(mut state) = snap.lock() {
                                 state.error = Some(format!("音频解码失败: {error}"));
-                                state.ended = true;
+                                state.ended = false;
+                                state.playing = false;
                             }
                         }
                     }
@@ -224,6 +230,21 @@ fn qr_image(url: &str) -> Option<Image> {
     Some(Image::from_rgba8(buffer))
 }
 
+fn load_volume() -> f32 {
+    fs::read_to_string(paths::data_dir().join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("volume").and_then(|v| v.as_f64()))
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+        .unwrap_or(0.7)
+}
+
+fn save_volume(value: f32) {
+    let path = paths::data_dir().join("settings.json");
+    let payload = format!("{{\"volume\":{:.4}}}", value.clamp(0.0, 1.0));
+    let _ = fs::write(path, payload);
+}
+
 fn find_track(catalog: &Catalog, id: &str) -> Option<(netease::TrackDto, Vec<netease::TrackDto>)> {
     for list in [
         &catalog.detail,
@@ -272,7 +293,14 @@ fn start_track(
                 return;
             }
         };
-        let response = match state.stream.get(&url).send().await {
+        let response = match state
+            .stream
+            .get(&url)
+            .header(reqwest::header::REFERER, "https://music.163.com/")
+            .header(reqwest::header::ACCEPT, "*/*")
+            .send()
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 let message = format!("下载音源失败: {error}");
@@ -280,6 +308,10 @@ fn start_track(
                 return;
             }
         };
+        if !response.url().host_str().is_some_and(state::is_allowed_audio_host) {
+            update_ui(&ui, move |ui| ui.set_status_text("音源域名异常".into()));
+            return;
+        }
         if !response.status().is_success() {
             let message = format!("音源返回 HTTP {}", response.status());
             update_ui(&ui, move |ui| ui.set_status_text(message.into()));
@@ -403,8 +435,8 @@ fn load_library(
                 let playlists = playlist_items(&library.playlists);
                 let recent = track_items(&library.recent);
                 update_ui(&ui, move |ui| {
-                    ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(playlists))));
-                    ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(recent))));
+                    ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(playlists))));
+                    ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(recent))));
                     ui.set_status_text(format!("资料库：{} 个歌单", library.playlists.len()).into());
                 });
             }
@@ -446,7 +478,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lyrics = Arc::new(Mutex::new(Vec::<netease::LyricLine>::new()));
     let generation = Arc::new(AtomicU64::new(0));
     let audio = spawn_audio();
-    let _ = audio.tx.send(AudioCmd::Volume(0.7));
+    let volume = load_volume();
+    ui.set_volume(volume);
+    let _ = audio.tx.send(AudioCmd::Volume(volume));
 
     ui.set_status_text(paths::data_dir().display().to_string().into());
     ui.set_login_open(true);
@@ -718,6 +752,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_volume_changed(move |value| {
             let _ = audio.tx.send(AudioCmd::Volume(value));
         });
+    }
+
+    {
+        ui.on_volume_released(move |value| save_volume(value));
     }
 
     {
