@@ -16,7 +16,9 @@ cc = "1"
 winres = "0.1"
 
 [dependencies]
-slint = { version = "1.18", default-features = false, features = ["backend-winit", "renderer-software", "compat-1-2", "std", "accessibility"] }
+# Prefer OpenGL (femtovg) for hardware acceleration; the winit backend falls
+# back to the software renderer when no usable GL context can be created.
+slint = { version = "1.18", default-features = false, features = ["backend-winit", "renderer-femtovg", "renderer-software", "compat-1-2", "std", "accessibility"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "gzip", "stream", "blocking"] }
