@@ -2338,6 +2338,11 @@ export component AppWindow inherits Window {
             background: Theme.border-strong;
             clip: true;
             Rectangle {
+                // Explicit left origin: a child Rectangle with only a width is
+                // centered by default, which made the dock progress grow from
+                // the middle towards both sides.
+                x: 0;
+                y: 0;
                 width: root.duration > 0 ? min(parent.width, parent.width * max(0, min(1, root.progress / root.duration))) : 0px;
                 height: 100%;
                 border-radius: 1px;
