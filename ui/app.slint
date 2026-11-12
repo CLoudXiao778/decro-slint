@@ -2734,6 +2734,20 @@ export component AppWindow inherits Window {
                             Text { text: "查看歌词"; color: #ffffffd9; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
                         }
                         cover-tap := TouchArea { clicked => { root.lyrics-mode = true; } }
+                        // The album label sits on top of the full-cover hit area;
+                        // clicking it opens the album instead of switching to lyrics.
+                        cover-album-tap := TouchArea {
+                            x: 12px;
+                            y: parent.height - 32px;
+                            width: parent.width - 24px;
+                            height: 26px;
+                            enabled: root.current-album-id != "";
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.close-player();
+                                root.open-album(root.current-album-id);
+                            }
+                        }
                     }
                 }
 
@@ -2770,18 +2784,79 @@ export component AppWindow inherits Window {
                             clicked => { root.player-menu-open = !root.player-menu-open; }
                         }
                     }
-                    Text {
-                        text: root.current-artist;
-                        color: #ffffff9e;
-                        font-size: 16px;
-                        overflow: elide;
+                    Rectangle {
+                        height: 22px;
+                        background: transparent;
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: root.current-artist;
+                            color: artist-line-tap.has-hover && root.current-artist-id != "" ? #ffffff : #ffffff9e;
+                            font-size: 16px;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        artist-line-tap := TouchArea {
+                            enabled: root.current-artist-id != "";
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.close-player();
+                                root.open-artist(root.current-artist-id);
+                            }
+                        }
                     }
                     Rectangle { height: 16px; }
-                    Text {
-                        text: "\"" + root.current-album + "\" · " + root.current-artist;
-                        color: #ffffff85;
-                        font-size: 14px;
-                        overflow: elide;
+                    album-meta := Rectangle {
+                        width: 100%;
+                        height: 20px;
+                        background: transparent;
+                        HorizontalLayout {
+                            spacing: 0px;
+                            album-meta-album := Text {
+                                text: "\"" + root.current-album + "\"";
+                                color: album-meta-album-tap.has-hover && root.current-album-id != "" ? #ffffff : #ffffff85;
+                                font-size: 14px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: " · ";
+                                color: #ffffff85;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                            album-meta-artist := Text {
+                                text: root.current-artist;
+                                color: album-meta-artist-tap.has-hover && root.current-artist-id != "" ? #ffffff : #ffffff85;
+                                font-size: 14px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                        }
+                        album-meta-album-tap := TouchArea {
+                            x: album-meta-album.absolute-position.x - album-meta.absolute-position.x;
+                            y: 0;
+                            width: album-meta-album.width;
+                            height: parent.height;
+                            enabled: root.current-album-id != "";
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.close-player();
+                                root.open-album(root.current-album-id);
+                            }
+                        }
+                        album-meta-artist-tap := TouchArea {
+                            x: album-meta-artist.absolute-position.x - album-meta.absolute-position.x;
+                            y: 0;
+                            width: album-meta-artist.width;
+                            height: parent.height;
+                            enabled: root.current-artist-id != "";
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.close-player();
+                                root.open-artist(root.current-artist-id);
+                            }
+                        }
                     }
                     Text {
                         text: root.current-quality + " · 网易云音乐";
@@ -2805,7 +2880,27 @@ export component AppWindow inherits Window {
                 padding-top: 8px; padding-left: 100px; padding-right: 100px;
                 spacing: 0px;
                 Text { text: root.current-title; color: #fff; font-size: 40px; font-weight: 700; overflow: elide; }
-                Text { text: root.current-artist; color: #ffffff9e; font-size: 16px; }
+                Rectangle {
+                    height: 22px;
+                    background: transparent;
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: root.current-artist;
+                        color: lyric-artist-tap.has-hover && root.current-artist-id != "" ? #ffffff : #ffffff9e;
+                        font-size: 16px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    lyric-artist-tap := TouchArea {
+                        enabled: root.current-artist-id != "";
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.close-player();
+                            root.open-artist(root.current-artist-id);
+                        }
+                    }
+                }
                 HorizontalLayout {
                     spacing: 10px;
                     cross-axis-alignment: center;
