@@ -81,6 +81,7 @@ extern "C" {
     fn ne_album_detail(id: *const c_char) -> *mut NeResp;
     fn ne_playlist_subscribe(id: *const c_char, t: *const c_char) -> *mut NeResp;
     fn ne_playlist_create(name: *const c_char, privacy: *const c_char) -> *mut NeResp;
+    fn ne_homepage_block_page(refresh: *const c_char, cursor: *const c_char) -> *mut NeResp;
     fn ne_resp_free(resp: *mut NeResp);
     fn decro_alloc(size: usize) -> *mut c_void;
     fn decro_free(ptr: *mut c_void);
@@ -429,6 +430,15 @@ fn response_json(resp: *mut NeResp, target: &str) -> Result<Value, String> {
         }
     }
     Ok(json)
+}
+
+/// Radar playlists from the mobile homepage block stream. The block is the
+/// only place NetEase exposes radar cards; the generic personalized-playlist
+/// endpoint returns static curated playlists instead.
+pub fn homepage_radar() -> Result<Value, String> {
+    init();
+    let resp = unsafe { ne_homepage_block_page(cstring("false").as_ptr(), cstring("").as_ptr()) };
+    response_json(resp, "雷达歌单")
 }
 
 pub fn playlist_subscribe(id: &str, subscribe: bool) -> Result<(), String> {

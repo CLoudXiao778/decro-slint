@@ -1017,8 +1017,10 @@ export component AppWindow inherits Window {
 
     // Models
     in property <[PlaylistItem]> playlists;
+    in property <[PlaylistItem]> radar-playlists;
     in property <PlaylistItem> daily-feature;
     in property <PlaylistItem> feature-playlist;
+    in property <string> feature-eyebrow: "为你推荐";
     in property <[TrackItem]> recent-tracks;
     in property <[TrackItem]> daily-tracks;
     in property <[TrackItem]> new-tracks;
@@ -1439,11 +1441,38 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                                 height: 460px;
                                 item: root.feature-playlist;
-                                eyebrow: "为你推荐";
+                                eyebrow: root.feature-eyebrow;
                                 clicked => {
                                     if root.feature-playlist.id != "" {
                                         root.open-playlist(root.feature-playlist.id);
                                     }
+                                }
+                            }
+                        }
+
+                        if root.radar-playlists.length > 0 : VerticalLayout {
+                            spacing: 12px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                cross-axis-alignment: center;
+                                Text { text: "雷达歌单"; color: Theme.text; font-size: 20px; font-weight: 700; }
+                                Rectangle {
+                                    height: 20px;
+                                    width: 46px;
+                                    border-radius: 10px;
+                                    background: Theme.accent-soft;
+                                    Text { text: "每日更新"; color: Theme.accent; font-size: 9px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                            Flickable {
+                                height: 236px;
+                                content-width: root.radar-playlists.length * 192px;
+                                content-height: self.height;
+                                for item[index] in root.radar-playlists : ShelfCard {
+                                    x: index * 192px;
+                                    y: 0;
+                                    item: item;
+                                    clicked => { root.open-playlist(item.id); }
                                 }
                             }
                         }
@@ -2274,7 +2303,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.4.2 · Slint 原生版 · 数据便携"; color: Theme.faint; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.4.3 · Slint 原生版 · 数据便携"; color: Theme.faint; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }

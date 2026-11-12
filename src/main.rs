@@ -443,6 +443,20 @@ fn playlist_items_for_ui(items: &[netease::PlaylistDto]) -> Vec<PlaylistItem> {
         .collect()
 }
 
+fn radar_playlist_items_for_ui(items: &[netease::PlaylistDto]) -> Vec<PlaylistItem> {
+    items
+        .iter()
+        .map(|playlist| PlaylistItem {
+            id: playlist.id.clone().into(),
+            title: playlist.name.clone().into(),
+            meta: "网易云音乐 · 每日更新".into(),
+            cover: Image::default(),
+            tint: color_for(&playlist.id),
+            pinned: false,
+        })
+        .collect()
+}
+
 fn artist_items_for_ui(items: &[netease::ArtistInfo]) -> Vec<PlaylistItem> {
     items
         .iter()
@@ -486,6 +500,7 @@ fn album_items_for_ui(items: &[netease::AlbumInfo]) -> Vec<PlaylistItem> {
 #[derive(Clone, Copy)]
 enum PlaylistTarget {
     Home,
+    Radar,
     Library,
     Search,
     SearchArtists,
@@ -496,6 +511,7 @@ enum PlaylistTarget {
 fn playlist_model_for(ui: &AppWindow, target: PlaylistTarget) -> ModelRc<PlaylistItem> {
     match target {
         PlaylistTarget::Home => ui.get_playlists(),
+        PlaylistTarget::Radar => ui.get_radar_playlists(),
         PlaylistTarget::Library => ui.get_library_playlists(),
         PlaylistTarget::Search => ui.get_search_playlists(),
         PlaylistTarget::SearchArtists => ui.get_search_artists(),
@@ -515,7 +531,7 @@ async fn load_playlist_covers(
     let mut tasks = JoinSet::new();
     for (index, playlist) in playlists.into_iter().take(limit).enumerate() {
         let size = match target {
-            PlaylistTarget::Home | PlaylistTarget::Search => 256,
+            PlaylistTarget::Home | PlaylistTarget::Radar | PlaylistTarget::Search => 256,
             PlaylistTarget::Library
             | PlaylistTarget::SearchArtists
             | PlaylistTarget::SearchAlbums
@@ -1967,9 +1983,14 @@ fn load_home(
                 let daily_covers = home.daily.clone();
                 let new_covers = home.new_songs.clone();
                 let recommended = home.recommended.clone();
-                let recommended_count = recommended.len();
+                let radar_covers = home.radar.clone();
+                let feature_dto = home
+                    .radar
+                    .first()
+                    .or_else(|| home.recommended.first())
+                    .cloned();
+                let feature_is_radar = !home.radar.is_empty();
                 let daily_first = home.daily.first().cloned();
-                let feature_dto = home.recommended.first().cloned();
                 let daily_first_cover = daily_first.clone();
                 let feature_cover = feature_dto.clone();
                 let daily_count = home.daily.len();
@@ -1986,6 +2007,17 @@ fn load_home(
                     ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
                         playlist_items_for_ui(&home.recommended),
                     ))));
+                    ui.set_radar_playlists(ModelRc::from(Rc::new(VecModel::from(
+                        radar_playlist_items_for_ui(&home.radar),
+                    ))));
+                    ui.set_feature_eyebrow(
+                        if feature_is_radar {
+                            "私人雷达"
+                        } else {
+                            "为你推荐"
+                        }
+                        .into(),
+                    );
 
                     let daily_tint = daily_first
                         .as_ref()
@@ -2007,14 +2039,16 @@ fn load_home(
                         ui.set_feature_playlist(PlaylistItem {
                             id: playlist.id.clone().into(),
                             title: playlist.name.clone().into(),
-                            meta: format!("{} · {} 首", playlist.creator, playlist.track_count)
-                                .into(),
+                            meta: if feature_is_radar {
+                                "网易云音乐 · 每日更新".into()
+                            } else {
+                                format!("{} · {} 首", playlist.creator, playlist.track_count).into()
+                            },
                             cover: Image::default(),
                             tint: color_for(&playlist.id),
                             pinned: false,
                         });
                     }
-                    let _ = recommended_count;
                     if let Some(error) = home_error {
                         ui.set_status_text(error.into());
                     } else if !ui.get_login_open() {
@@ -2104,6 +2138,13 @@ fn load_home(
                     ui.clone(),
                     PlaylistTarget::Home,
                     recommended,
+                    12,
+                ));
+                tokio::spawn(load_playlist_covers(
+                    state.clone(),
+                    ui.clone(),
+                    PlaylistTarget::Radar,
+                    radar_covers,
                     12,
                 ));
             }
