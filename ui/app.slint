@@ -20,6 +20,11 @@ export struct PlaylistItem {
     pinned: bool,
 }
 
+export struct ArtistLinkItem {
+    id: string,
+    name: string,
+}
+
 export struct LyricItem {
     time: float,
     text: string,
@@ -301,6 +306,38 @@ component PlayerQualityChip inherits Rectangle {
         vertical-alignment: center;
     }
     qc-tap := TouchArea { clicked => { root.clicked(); } }
+}
+
+component InlineLink inherits Rectangle {
+    in property <string> label;
+    in property <length> font-size: 14px;
+    in property <color> idle-color: #ffffff85;
+    in property <bool> interactive: true;
+    callback clicked();
+    width: link-text.width;
+    height: root.font-size + 6px;
+    horizontal-stretch: 0;
+    background: transparent;
+    link-text := Text {
+        text: root.label;
+        color: tap.has-hover && root.interactive ? #ffffff : root.idle-color;
+        font-size: root.font-size;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Rectangle {
+        visible: tap.has-hover && root.interactive;
+        x: 0;
+        y: parent.height - 1px;
+        width: parent.width;
+        height: 1px;
+        background: #ffffff;
+    }
+    tap := TouchArea {
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
 }
 
 // ── Content components ───────────────────────────────────────────────────
@@ -1031,6 +1068,7 @@ export component AppWindow inherits Window {
     in property <string> current-album: "";
     in property <string> current-artist-id: "";
     in property <string> current-album-id: "";
+    in property <[ArtistLinkItem]> current-artists;
     in property <string> current-quality: "";
     in property <string> current-track-quality: "";
     in-out property <bool> player-menu-open;
@@ -2236,7 +2274,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.4.1 · Slint 原生版 · 数据便携"; color: Theme.faint; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.4.2 · Slint 原生版 · 数据便携"; color: Theme.faint; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -2347,7 +2385,9 @@ export component AppWindow inherits Window {
                 height: 100%;
                 border-radius: 1px;
                 background: #ff645d;
-                animate width { duration: 380ms; easing: linear; }
+                // No width animation: while minimized progress updates are
+                // paused, so restoring would otherwise animate from the old
+                // (often zero) width to the current position.
             }
         }
     }
@@ -2796,79 +2836,87 @@ export component AppWindow inherits Window {
                             clicked => { root.player-menu-open = !root.player-menu-open; }
                         }
                     }
-                    Rectangle {
+                    HorizontalLayout {
                         height: 22px;
-                        background: transparent;
-                        Text {
-                            width: 100%;
-                            height: 100%;
+                        spacing: 0px;
+                        for artist[index] in root.current-artists : HorizontalLayout {
+                            spacing: 0px;
+                            if index > 0 : Text {
+                                text: " / ";
+                                color: #ffffff9e;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                            InlineLink {
+                                label: artist.name;
+                                font-size: 16px;
+                                idle-color: #ffffff9e;
+                                interactive: artist.id != "";
+                                clicked => {
+                                    root.close-player();
+                                    root.open-artist(artist.id);
+                                }
+                            }
+                        }
+                        if root.current-artists.length == 0 : Text {
                             text: root.current-artist;
-                            color: artist-line-tap.has-hover && root.current-artist-id != "" ? #ffffff : #ffffff9e;
+                            color: #ffffff9e;
                             font-size: 16px;
                             overflow: elide;
                             vertical-alignment: center;
                         }
-                        artist-line-tap := TouchArea {
-                            enabled: root.current-artist-id != "";
-                            mouse-cursor: pointer;
-                            clicked => {
-                                root.close-player();
-                                root.open-artist(root.current-artist-id);
-                            }
-                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                     Rectangle { height: 16px; }
-                    album-meta := Rectangle {
-                        width: 100%;
+                    HorizontalLayout {
                         height: 20px;
-                        background: transparent;
-                        HorizontalLayout {
-                            spacing: 0px;
-                            album-meta-album := Text {
-                                text: "\"" + root.current-album + "\"";
-                                color: album-meta-album-tap.has-hover && root.current-album-id != "" ? #ffffff : #ffffff85;
-                                font-size: 14px;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: " · ";
-                                color: #ffffff85;
-                                font-size: 14px;
-                                vertical-alignment: center;
-                            }
-                            album-meta-artist := Text {
-                                text: root.current-artist;
-                                color: album-meta-artist-tap.has-hover && root.current-artist-id != "" ? #ffffff : #ffffff85;
-                                font-size: 14px;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                        }
-                        album-meta-album-tap := TouchArea {
-                            x: album-meta-album.absolute-position.x - album-meta.absolute-position.x;
-                            y: 0;
-                            width: album-meta-album.width;
-                            height: parent.height;
-                            enabled: root.current-album-id != "";
-                            mouse-cursor: pointer;
+                        spacing: 0px;
+                        InlineLink {
+                            label: "\"" + root.current-album + "\"";
+                            font-size: 14px;
+                            idle-color: #ffffff85;
+                            interactive: root.current-album-id != "";
                             clicked => {
                                 root.close-player();
                                 root.open-album(root.current-album-id);
                             }
                         }
-                        album-meta-artist-tap := TouchArea {
-                            x: album-meta-artist.absolute-position.x - album-meta.absolute-position.x;
-                            y: 0;
-                            width: album-meta-artist.width;
-                            height: parent.height;
-                            enabled: root.current-artist-id != "";
-                            mouse-cursor: pointer;
-                            clicked => {
-                                root.close-player();
-                                root.open-artist(root.current-artist-id);
+                        Text {
+                            text: " · ";
+                            color: #ffffff85;
+                            font-size: 14px;
+                            horizontal-stretch: 0;
+                            vertical-alignment: center;
+                        }
+                        for artist[index] in root.current-artists : HorizontalLayout {
+                            spacing: 0px;
+                            if index > 0 : Text {
+                                text: " / ";
+                                color: #ffffff85;
+                                font-size: 14px;
+                                horizontal-stretch: 0;
+                                vertical-alignment: center;
+                            }
+                            InlineLink {
+                                label: artist.name;
+                                font-size: 14px;
+                                idle-color: #ffffff85;
+                                interactive: artist.id != "";
+                                clicked => {
+                                    root.close-player();
+                                    root.open-artist(artist.id);
+                                }
                             }
                         }
+                        if root.current-artists.length == 0 : Text {
+                            text: root.current-artist;
+                            color: #ffffff85;
+                            font-size: 14px;
+                            horizontal-stretch: 0;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                     Text {
                         text: root.current-quality + " · 网易云音乐";
@@ -2892,26 +2940,38 @@ export component AppWindow inherits Window {
                 padding-top: 8px; padding-left: 100px; padding-right: 100px;
                 spacing: 0px;
                 Text { text: root.current-title; color: #fff; font-size: 40px; font-weight: 700; overflow: elide; }
-                Rectangle {
+                HorizontalLayout {
                     height: 22px;
-                    background: transparent;
-                    Text {
-                        width: 100%;
-                        height: 100%;
+                    spacing: 0px;
+                    for artist[index] in root.current-artists : HorizontalLayout {
+                        spacing: 0px;
+                        if index > 0 : Text {
+                            text: " / ";
+                            color: #ffffff9e;
+                            font-size: 16px;
+                            horizontal-stretch: 0;
+                            vertical-alignment: center;
+                        }
+                        InlineLink {
+                            label: artist.name;
+                            font-size: 16px;
+                            idle-color: #ffffff9e;
+                            interactive: artist.id != "";
+                            clicked => {
+                                root.close-player();
+                                root.open-artist(artist.id);
+                            }
+                        }
+                    }
+                    if root.current-artists.length == 0 : Text {
                         text: root.current-artist;
-                        color: lyric-artist-tap.has-hover && root.current-artist-id != "" ? #ffffff : #ffffff9e;
+                        color: #ffffff9e;
                         font-size: 16px;
+                        horizontal-stretch: 0;
                         overflow: elide;
                         vertical-alignment: center;
                     }
-                    lyric-artist-tap := TouchArea {
-                        enabled: root.current-artist-id != "";
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.close-player();
-                            root.open-artist(root.current-artist-id);
-                        }
-                    }
+                    Rectangle { horizontal-stretch: 1; }
                 }
                 HorizontalLayout {
                     spacing: 10px;
@@ -3122,15 +3182,29 @@ export component AppWindow inherits Window {
                     height: 22px;
                     vertical-alignment: center;
                 }
-                PlayerMenuItem {
-                    label: "查看歌手";
+                if root.current-artists.length > 1 : Text {
+                    text: "查看歌手";
+                    color: #ffffff66;
+                    font-size: 9px;
+                    font-weight: 650;
+                    letter-spacing: 1px;
+                    height: 22px;
+                    vertical-alignment: center;
+                }
+                for artist in root.current-artists : PlayerMenuItem {
+                    label: root.current-artists.length > 1 ? artist.name : "查看歌手";
                     icon: @image-url("../assets/icons/user.svg");
-                    enabled: root.current-artist-id != "";
+                    enabled: artist.id != "";
                     clicked => {
                         root.player-menu-open = false;
                         root.close-player();
-                        root.open-artist(root.current-artist-id);
+                        root.open-artist(artist.id);
                     }
+                }
+                if root.current-artists.length == 0 : PlayerMenuItem {
+                    label: "查看歌手";
+                    icon: @image-url("../assets/icons/user.svg");
+                    enabled: false;
                 }
                 PlayerMenuItem {
                     label: "查看专辑";

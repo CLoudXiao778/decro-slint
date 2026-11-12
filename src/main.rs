@@ -1564,6 +1564,26 @@ fn start_track(
     let title = track.name.clone();
     let artist = track.artist.clone();
     let album = track.album.clone();
+    let artist_links = if track.artists.is_empty() {
+        if track.artist.is_empty() {
+            Vec::new()
+        } else {
+            vec![ArtistLinkItem {
+                id: track.artist_id.clone().into(),
+                name: track.artist.clone().into(),
+            }]
+        }
+    } else {
+        track
+            .artists
+            .iter()
+            .filter(|artist| !artist.name.is_empty())
+            .map(|artist| ArtistLinkItem {
+                id: artist.id.clone().into(),
+                name: artist.name.clone().into(),
+            })
+            .collect()
+    };
     let media_title = title.clone();
     let media_artist = artist.clone();
     let media_album = album.clone();
@@ -1610,6 +1630,7 @@ fn start_track(
         ui.set_current_album(album.into());
         ui.set_current_artist_id(artist_id.into());
         ui.set_current_album_id(album_id.into());
+        ui.set_current_artists(ModelRc::from(Rc::new(VecModel::from(artist_links))));
         ui.set_current_quality(quality_text.into());
         ui.set_current_track_quality(quality_override_text.into());
         ui.set_player_menu_open(false);
@@ -2701,6 +2722,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_current_artist("".into());
                     ui.set_current_album("".into());
                     ui.set_current_quality("".into());
+                    ui.set_current_artists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        ArtistLinkItem,
+                    >::new(
+                    )))));
                     ui.set_current_cover_image(Image::default());
                     ui.set_current_backdrop(Image::default());
                     ui.set_lyrics(ModelRc::from(Rc::new(VecModel::from(
