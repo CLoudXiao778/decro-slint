@@ -1835,6 +1835,18 @@ fn toggle_playback(
     generation: &Arc<AtomicU64>,
     prefs: &Arc<Mutex<Prefs>>,
 ) {
+    let loaded = audio
+        .snapshot
+        .lock()
+        .map(|snapshot| snapshot.loaded && snapshot.token == generation.load(Ordering::Relaxed))
+        .unwrap_or(false);
+    // Check the real audio snapshot first: the UI loading flag can stay true
+    // for a while when the window is minimized, which used to make SMTC
+    // play/pause silently ignore the button after next/previous.
+    if loaded {
+        let _ = audio.tx.send(AudioCmd::PlayPause);
+        return;
+    }
     if let Some(ui) = weak.upgrade() {
         if ui.get_loading() {
             set_status_temp(
@@ -1845,30 +1857,21 @@ fn toggle_playback(
             return;
         }
     }
-    let loaded = audio
-        .snapshot
-        .lock()
-        .map(|snapshot| snapshot.loaded && snapshot.token == generation.load(Ordering::Relaxed))
-        .unwrap_or(false);
-    if !loaded {
-        let track = player.lock().ok().and_then(|player| player.current.clone());
-        if let Some(track) = track {
-            start_track(
-                runtime,
-                state.clone(),
-                weak.clone(),
-                audio.clone(),
-                player.clone(),
-                lyrics.clone(),
-                generation.clone(),
-                prefs.clone(),
-                track,
-                true,
-            );
-        }
-        return;
+    let track = player.lock().ok().and_then(|player| player.current.clone());
+    if let Some(track) = track {
+        start_track(
+            runtime,
+            state.clone(),
+            weak.clone(),
+            audio.clone(),
+            player.clone(),
+            lyrics.clone(),
+            generation.clone(),
+            prefs.clone(),
+            track,
+            true,
+        );
     }
-    let _ = audio.tx.send(AudioCmd::PlayPause);
 }
 
 fn play_relative(
@@ -5055,6 +5058,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Keep media keys and auto-advance working while the window is
                 // minimized, but skip the UI/label/lyrics writes that would
                 // fault pages back into the working set.
+                if snapshot.loaded || snapshot.ended || snapshot.error.is_some() {
+                    // Clear the stale loading flag so SMTC play/pause keeps
+                    // working after a next/previous while minimized.
+                    if ui.get_loading() {
+                        ui.set_loading(false);
+                    }
+                }
                 if snapshot.ended {
                     if let Ok(mut snap) = audio.snapshot.lock() {
                         snap.ended = false;
