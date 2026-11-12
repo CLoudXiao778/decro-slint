@@ -1460,7 +1460,7 @@ pub async fn resolve_song_url(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_lrc;
+    use super::{parse_lrc, parse_radar_playlists};
 
     #[test]
     fn lrc_handles_multiple_timestamps() {
@@ -1476,5 +1476,41 @@ mod tests {
         let lines = parse_lrc("[offset:500]\n[00:01.00]hello");
         assert_eq!(lines.len(), 1);
         assert!((lines[0].0 - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn radar_block_parses_playlists() {
+        let value = serde_json::json!({
+            "data": {
+                "blocks": [{
+                    "blockCode": "HOMEPAGE_BLOCK_MGC_PLAYLIST",
+                    "creatives": [
+                        {
+                            "creativeId": 12345,
+                            "uiElement": {
+                                "mainTitle": {"title": "私人雷达"},
+                                "image": {"imageUrl": "http://p1.music.126.net/a.jpg"}
+                            }
+                        },
+                        {
+                            "creativeId": "67890",
+                            "uiElement": {
+                                "mainTitle": {"title": "新歌雷达"},
+                                "image": {"imageUrl": "https://p1.music.126.net/b.jpg"}
+                            }
+                        }
+                    ]
+                }, {
+                    "blockCode": "HOMEPAGE_BLOCK_OTHER",
+                    "creatives": [{"creativeId": 1}]
+                }]
+            }
+        });
+        let playlists = parse_radar_playlists(&value);
+        assert_eq!(playlists.len(), 2);
+        assert_eq!(playlists[0].id, "12345");
+        assert_eq!(playlists[0].name, "私人雷达");
+        assert!(playlists[0].cover_url.starts_with("https://"));
+        assert_eq!(playlists[1].id, "67890");
     }
 }
