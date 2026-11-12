@@ -4,11 +4,11 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：`0.3.6`（commit `270f4e2`，已发布预发布版 `v0.3.6-slint`）
-- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.3.6-slint`
-  - 资产：`Decro.Slint_0.3.6_portable_x64.zip`
-  - SHA256：`ec94dec1a921f80ecdce6f0eca772300c05950da6879b78611a60d93345d2769`
-  - 预发布；SMTC/音频/歌词/morph 仍需 Windows 真机验证
+- 当前版本：`0.4.0`（commit `e96808e`，已发布预发布版 `v0.4.0-slint`）
+- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.0-slint`
+  - 资产：`Decro.Slint_0.4.0_portable_x64.zip`
+  - SHA256：`67b99dcf86d7fb54ddb7312f9cb00fb94cb5d0794242f18f270e1edd0d59541d`
+  - 预发布；浅色主题/任务栏按钮/进度/SMTC seek/随机播放/剪贴板/单曲音质重载仍需 Windows 真机验证
 - 定位：Tauri 版 Decro 的原生 Slint 重写，Windows x64 便携版。当前开始作为正式项目开发，不再是方案验证。
 - Tauri 参考仓库：`/home/cloud/code/neteaseM3PC`（只读参考；本对话后续专注修 Slint，不要再把两者混在一起改）。
 
@@ -17,18 +17,23 @@
 - Slint `1.18.1`，软件渲染器 `renderer-software`，不依赖 WebView2。
 - 数据便携：exe 同目录 `data/`，升级只替换 exe。
 - 目标：正常内存 <150MB、最小化 <75MB；保持低存储占用。
-- 深色 UI 为主，中文界面；UI 按 Tauri 截图/CSS 重绘，不另起炉灶。
+- 中文界面；UI 按 Tauri 截图/CSS 重绘，不另起炉灶。0.4.0 起支持浅色/深色主题，播放页保持深色。
 - 软件渲染器限制：没有实时 `backdrop-filter`；封面模糊是 `image` crate 预生成的真实模糊图；`drop-shadow` 在软件渲染器里是 TODO（不显示）。
 
-## 已实现能力（0.3.5）
+## 已实现能力（0.4.0）
 
 - 网易云扫码登录、Cookie 导入、登录态恢复（DPAPI）。
 - 首页/推荐/资料库/搜索/歌单详情/最近播放/每日推荐。
 - 搜索分类：歌曲/歌单/歌手/专辑（分类始终显示）。
 - 歌手页、专辑页，专辑→歌手返回栈。
 - 播放/暂停/上一首/下一首、进度恢复、音量、音质、喜欢、歌词与翻译。
+- 浅色/深色主题（标题栏/设置页切换，`settings.json` 持久化）；播放页/歌词页/队列固定深色。
+- 资料库歌单置顶、打开次数排序、常用 8 个/展开全部（`data/playlist-state.json`）。
+- 播放页更多菜单：查看歌手/专辑、复制歌曲信息、单曲音质覆盖（`data/track-quality.json`）。
+- 详情页分享/更多、曲目菜单、歌单/每日推荐随机播放。
 - 播放页：dock↔播放页封面飞行、播放/下一首按钮 morph、波形进度条、队列面板。
-- Windows SMTC：媒体键、系统媒体浮层、任务栏封面/状态。
+- Windows SMTC：媒体键、系统媒体浮层、任务栏封面/状态、拖动进度 seek。
+- 任务栏缩略图按钮（上一首/播放暂停/下一首）与任务栏播放进度。
 - 关闭修复：X/Alt+F4 退出事件循环并结束进程（2 秒强制退出兜底）。
 - 内存日志与最小化工作集回收（`target=memory`）。
 - 性能优化：环境光预渲染、播放页背景去 1.16x 过采样、播放页展开后隐藏背后工作区。
@@ -38,9 +43,9 @@
 - `src/main.rs`：入口、UI 回调、播放器、恢复/保存、封面加载、morph、内存/退出逻辑。
 - `ui/app.slint`：全部 UI、动画、播放页、列表、弹窗。
 - `src/netease.rs` / `src/libnetease.rs` / `vendor/libnetease/`：网易云 API 与 C 封装。
-- `src/media.rs`：Windows SMTC（独立线程 + 原子命令）。
+- `src/media.rs`：Windows SMTC + 任务栏缩略图/进度（独立线程 + 原子命令）+ 剪贴板文本。
 - `src/memory.rs`：working set / private 统计与 `EmptyWorkingSet`。
-- `src/auth.rs`、`src/state.rs`、`src/proxy.rs`、`src/logger.rs`、`src/paths.rs`、`src/secure_store.rs`。
+- `src/auth.rs`、`src/state.rs`、`src/logger.rs`、`src/paths.rs`、`src/secure_store.rs`。
 - `assets/icons/`、`assets/wave.svg`、`assets/icon.png`。
 - `Cargo.toml`、`build.rs`、`.github/workflows/build.yml`。
 - `CHANGELOG.md`、`README.md`。
