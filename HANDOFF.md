@@ -4,10 +4,11 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：`0.3.6`（工作区，尚未提交/发布；上一发布为 `0.3.5`，commit `6127064`）
-- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.3.5-slint`
-  - 资产：`Decro.Slint_0.3.5_portable_x64.zip`
-  - SHA256：`d01d7d843dc9b4305a87fa762e7ea4c575917484c3de903e4106bcf745708813`
+- 当前版本：`0.3.6`（commit `270f4e2`，已发布预发布版 `v0.3.6-slint`）
+- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.3.6-slint`
+  - 资产：`Decro.Slint_0.3.6_portable_x64.zip`
+  - SHA256：`ec94dec1a921f80ecdce6f0eca772300c05950da6879b78611a60d93345d2769`
+  - 预发布；SMTC/音频/歌词/morph 仍需 Windows 真机验证
 - 定位：Tauri 版 Decro 的原生 Slint 重写，Windows x64 便携版。当前开始作为正式项目开发，不再是方案验证。
 - Tauri 参考仓库：`/home/cloud/code/neteaseM3PC`（只读参考；本对话后续专注修 Slint，不要再把两者混在一起改）。
 
@@ -64,7 +65,7 @@ cargo check --target x86_64-pc-windows-gnu
 
 ## 当前待办/风险
 
-- **0.3.6 为工作区修复版，尚未提交/发布**：播放状态机、歌词滚动、设置持久化、登录、异步令牌、SMTC 进度、流式音频、搜索/错误处理等修改见 `CHANGELOG.md` 的 0.3.6 段；其余功能差距也在该段“仍待处理”中列出。
+- **0.3.6 已提交并发布预发布版 `v0.3.6-slint`**：播放状态机、歌词滚动、设置持久化、登录、异步令牌、SMTC 进度、流式音频、搜索/错误处理等修改见 `CHANGELOG.md` 的 0.3.6 段；其余功能差距也在该段“仍待处理”中列出。真机验证后如需修复，继续在 0.3.6 基础上迭代。
 - **0.3.5 尚未真机确认**：封面/播放按钮 morph 的落点、动画结束后的 1px 黑线、波形进度条、重启恢复错歌修复，都需要用户实机反馈。0.3.6 已进一步修正恢复进度被定时器擦除、旧音频不停止、歌词滚动方向等问题，仍需实机验证。
 - **滚动帧率**：用户仍觉得未满 60fps。0.3.3 已做环境光预渲染/工作区隐藏/去 overscan；若仍卡，优先做长列表裁剪/虚拟化（资料库最近、最近播放、歌单详情、队列），并对比性能模式。
 - **浅色主题未实现**：Tauri 有深/浅色；Slint 目前只有深色。
