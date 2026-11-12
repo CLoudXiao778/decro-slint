@@ -53,37 +53,24 @@
 
 ## 构建/发布
 
-本地 Windows 目标检查（Linux 交叉）：
-
-```bash
-export PATH="/tmp/opencode/fakebin:$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR=/tmp/opencode/cargo-target-slint-win
-export CC_x86_64_pc_windows_gnu=gcc
-export AR_x86_64_pc_windows_gnu=ar
-cargo check --target x86_64-pc-windows-gnu
-```
-
-正式构建：push `main` 触发 GitHub Actions `slint-portable`，Windows MSVC 静态 CRT，产物为 `Decro.Slint_<version>_portable_x64.zip`。
-
-发布流程：下载 Actions artifact → 校验/记录 SHA256 → `gh release create vX.Y.Z-slint ... --prerelease` 上传 zip → 立即取消 tag 触发的 workflow，避免覆盖手工资产。
-
-版本需要同步：`Cargo.toml`、`ui/app.slint` 设置页 footer、`CHANGELOG.md`。
+- **只使用 GitHub Actions**（`.github/workflows/build.yml`），不在本地或 `/tmp` 做发布构建，不再手动 `gh release create`，也不再通过取消 tag workflow 来保护手工资产。
+- push `main`：自动运行 `cargo fmt --all -- --check`、`cargo test --locked`、Windows MSVC release 构建，并上传 Actions artifact；不发布。
+- push `vX.Y.Z-slint` tag：同样先格式检查、测试、构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 prerelease，资产附带 `sha256.txt`，release notes 从 `CHANGELOG.md` 对应版本段生成。
+- 发版步骤：同步 `Cargo.toml`、`ui/app.slint` footer、`CHANGELOG.md` → push `main` → 推送版本 tag。
+- Actions 使用 Windows MSVC + 静态 CRT，产物 `Decro.Slint_<version>_portable_x64.zip`。
 
 ## 当前待办/风险
 
-- **0.3.6 已提交并发布预发布版 `v0.3.6-slint`**：播放状态机、歌词滚动、设置持久化、登录、异步令牌、SMTC 进度、流式音频、搜索/错误处理等修改见 `CHANGELOG.md` 的 0.3.6 段；其余功能差距也在该段“仍待处理”中列出。真机验证后如需修复，继续在 0.3.6 基础上迭代。
-- **0.3.5 尚未真机确认**：封面/播放按钮 morph 的落点、动画结束后的 1px 黑线、波形进度条、重启恢复错歌修复，都需要用户实机反馈。0.3.6 已进一步修正恢复进度被定时器擦除、旧音频不停止、歌词滚动方向等问题，仍需实机验证。
-- **滚动帧率**：用户仍觉得未满 60fps。0.3.3 已做环境光预渲染/工作区隐藏/去 overscan；若仍卡，优先做长列表裁剪/虚拟化（资料库最近、最近播放、歌单详情、队列），并对比性能模式。
-- **浅色主题未实现**：Tauri 有深/浅色；Slint 目前只有深色。
-- **命令面板/键盘快捷键未实现**：Tauri 有 Ctrl+K、Space、方向键等。
-- **功能审计剩余**：最近搜索建议、歌单置顶/使用频率排序、歌词搜索分类等。
-- **SMTC/关闭退出/内存回收**已通过编译和 CI，但需要 Windows 真机验证。
-- 恢复错歌：已按“解码后真实时长” clamp，未知时长不 seek；若仍复现，查 `data/logs/decro.log` 的 `target=restore`、`target=play`、`resume clamped`。
+- **0.4.2 已发布**：GPU OpenGL 渲染、专辑/多歌手内联链接与悬停下划线、dock 进度恢复修复等已进入 `v0.4.2-slint`；需真机确认 GPU 是否实际启用、链接跳转/下划线、最小化恢复后的 dock 进度。
+- **Windows 11 任务栏**：如果系统不显示传统缩略图工具栏，任务栏上一首/播放暂停/下一首按钮不可见；进度条仍可用。Explorer 重启后按钮可能消失，当前未监听 `TaskbarButtonCreated` 重新添加。
+- **性能**：已切换 OpenGL femtovg；若仍卡顿，先确认任务管理器 GPU 占用非 0，再排查长列表（资料库/最近播放/详情/搜索）虚拟化。
+- **功能差距**：应用级快捷键/命令面板、窗口大小位置持久化、单实例唤回、桌面歌词/托盘。
+- Cookie jar 与服务端 Set-Cookie 续期尚未全量同步到所有直连请求。
+- 真机验证清单：浅色/深色主题、任务栏按钮/进度、SMTC seek、多歌手跳转、单曲音质重载、最小化 SMTC 播放暂停。
 
 ## 新会话建议顺序
 
-1. `git pull`，先确认 0.3.5 各项实机反馈。
-2. 关闭进程、morph 落点、1px 黑线、重启错歌逐项收尾。
-3. 滚动性能：先定位具体页面，再做列表裁剪/虚拟化。
-4. 正式路线：浅色主题 → 命令面板/快捷键 → Tauri 功能审计补齐。
-5. 每次改动保持：默认 OpenGL + 软件回退、便携数据目录、内存目标、中文 UI、Tauri 视觉参考。
+1. `git pull`，确认 0.4.2 真机验证结果。
+2. 性能：先确认 OpenGL 是否启用，再定位具体卡顿页面。
+3. 发版必须走 GitHub Actions tag 流程，不要本地构建或手动上传。
+4. 每次改动保持：默认 OpenGL + 软件回退、便携数据目录、内存目标、中文 UI、Tauri 视觉参考。

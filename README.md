@@ -43,13 +43,19 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
 | `covers/` | 封面缓存（启动时最多保留 3000 个文件） |
 | `audio-cache/` | 当前播放曲目的临时音频文件，启动时清理 |
 
-## 构建
+## 构建与发布
 
-```bash
-cargo build --release
-```
+正式构建和发布只通过 GitHub Actions 完成，不在本地构建或手动上传 Release。
 
-Windows 产物：`target/release/decro-slint.exe`。GitHub Actions 会打包成 `Decro.Slint_<version>_portable_x64.zip`。Windows 构建静态链接 CRT，不需要安装 VC++ 运行库。
+1. 更新 `Cargo.toml` 版本、`ui/app.slint` 设置页 footer 和 `CHANGELOG.md`，提交并推送 `main`。
+   - push `main` 会自动运行 `cargo fmt --check`、`cargo test`、release 构建并上传 Actions artifact，但不会发布。
+2. 推送与版本一致的 tag，例如 `v0.4.2-slint`：
+   ```bash
+   git tag v0.4.2-slint
+   git push origin v0.4.2-slint
+   ```
+3. Actions 会再次运行格式检查、测试和 release 构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 GitHub prerelease，并附带 zip 与 SHA256。
+4. Windows 构建静态链接 CRT，不需要安装 VC++ 运行库；不要在本地执行 release 构建或 `gh release create`。
 
 ## 已知限制
 
