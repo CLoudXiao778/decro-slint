@@ -2656,8 +2656,15 @@ export component AppWindow inherits Window {
                 if root.lyrics-mode : PillButton { label: "显示封面"; clicked => { root.lyrics-mode = false; } }
             }
 
-            // Player body
-            if !root.lyrics-mode : HorizontalLayout {
+            // Body/lyrics get all remaining height; the transport below keeps
+            // its preferred height so the progress bar stays at the same
+            // position in both cover and lyrics modes.
+            Rectangle {
+                vertical-stretch: 1;
+                background: transparent;
+
+                // Player body
+                if !root.lyrics-mode : HorizontalLayout {
                 vertical-stretch: 1;
                 padding-top: 10px; padding-bottom: 10px; padding-left: 28px; padding-right: 28px;
                 spacing: 70px;
@@ -2873,9 +2880,9 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                     }
                 }
-            }
+                }
 
-            if root.lyrics-mode : VerticalLayout {
+                if root.lyrics-mode : VerticalLayout {
                 vertical-stretch: 1;
                 padding-top: 8px; padding-left: 100px; padding-right: 100px;
                 spacing: 0px;
@@ -2938,10 +2945,15 @@ export component AppWindow inherits Window {
                         root.seek-lyric(time);
                     }
                 }
+                }
             }
 
             // Transport / progress
             VerticalLayout {
+                // Layout elements default to a stretch factor; keep the
+                // transport at its preferred height so the seek bar sits just
+                // above the controls in both cover and lyrics modes.
+                vertical-stretch: 0;
                 spacing: 4px;
                 SeekBar {
                     value: root.progress;
