@@ -346,6 +346,48 @@ fn ambient_background() -> Image {
     Image::from_rgba8(buffer)
 }
 
+/// Public web URL for the currently open detail page. IDs come from the
+/// NetEase API and are numeric; anything else is rejected to keep the URL safe.
+fn detail_share_url(kind: &str, id: &str) -> Option<String> {
+    if kind == "daily" {
+        return Some("https://music.163.com/#/discover/recommend".to_string());
+    }
+    if id.is_empty() || !id.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    match kind {
+        "playlist" => Some(format!("https://music.163.com/#/playlist?id={id}")),
+        "artist" => Some(format!("https://music.163.com/#/artist?id={id}")),
+        "album" => Some(format!("https://music.163.com/#/album?id={id}")),
+        _ => None,
+    }
+}
+
+fn open_external_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" || parsed.host_str() != Some("music.163.com") {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        // `start` is a cmd builtin; the empty title argument protects URLs
+        // containing `&` from being parsed as a second command.
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .is_ok()
+    }
+}
+
 fn color_for(id: &str) -> Color {
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
@@ -396,6 +438,7 @@ fn playlist_items_for_ui(items: &[netease::PlaylistDto]) -> Vec<PlaylistItem> {
             meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
             cover: Image::default(),
             tint: color_for(&playlist.id),
+            pinned: false,
         })
         .collect()
 }
@@ -415,6 +458,7 @@ fn artist_items_for_ui(items: &[netease::ArtistInfo]) -> Vec<PlaylistItem> {
                 meta: meta.into(),
                 cover: Image::default(),
                 tint: color_for(&artist.id),
+                pinned: false,
             }
         })
         .collect()
@@ -434,6 +478,7 @@ fn album_items_for_ui(items: &[netease::AlbumInfo]) -> Vec<PlaylistItem> {
             .into(),
             cover: Image::default(),
             tint: color_for(&album.id),
+            pinned: false,
         })
         .collect()
 }
@@ -870,6 +915,7 @@ struct Prefs {
     low_power: bool,
     show_translation: bool,
     cover_accent: bool,
+    theme: String,
 }
 
 impl Default for Prefs {
@@ -880,6 +926,7 @@ impl Default for Prefs {
             low_power: false,
             show_translation: true,
             cover_accent: true,
+            theme: "dark".to_string(),
         }
     }
 }
@@ -955,7 +1002,132 @@ fn load_prefs() -> Prefs {
             .get("coverAccent")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        theme: match value.get("theme").and_then(|v| v.as_str()) {
+            Some("light") => "light".to_string(),
+            _ => "dark".to_string(),
+        },
     }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct PlaylistState {
+    #[serde(default)]
+    pinned: Vec<String>,
+    #[serde(default)]
+    usage: std::collections::HashMap<String, u64>,
+}
+
+static PLAYLIST_STATE: OnceLock<Arc<Mutex<PlaylistState>>> = OnceLock::new();
+
+fn playlist_state() -> &'static Arc<Mutex<PlaylistState>> {
+    PLAYLIST_STATE.get_or_init(|| {
+        let state = fs::read_to_string(paths::data_dir().join("playlist-state.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<PlaylistState>(&text).ok())
+            .unwrap_or_default();
+        Arc::new(Mutex::new(state))
+    })
+}
+
+fn save_playlist_state(state: &PlaylistState) {
+    if let Ok(text) = serde_json::to_string(state) {
+        let _ = write_atomic(
+            &paths::data_dir().join("playlist-state.json"),
+            text.as_bytes(),
+        );
+    }
+}
+
+fn playlist_is_pinned(state: &PlaylistState, id: &str) -> bool {
+    state.pinned.iter().any(|item| item == id)
+}
+
+static TRACK_QUALITY: OnceLock<Arc<Mutex<std::collections::HashMap<String, String>>>> =
+    OnceLock::new();
+
+fn track_quality_map() -> &'static Arc<Mutex<std::collections::HashMap<String, String>>> {
+    TRACK_QUALITY.get_or_init(|| {
+        let map = fs::read_to_string(paths::data_dir().join("track-quality.json"))
+            .ok()
+            .and_then(|text| {
+                serde_json::from_str::<std::collections::HashMap<String, String>>(&text).ok()
+            })
+            .unwrap_or_default();
+        Arc::new(Mutex::new(map))
+    })
+}
+
+fn save_track_quality(map: &std::collections::HashMap<String, String>) {
+    if let Ok(text) = serde_json::to_string(map) {
+        let _ = write_atomic(
+            &paths::data_dir().join("track-quality.json"),
+            text.as_bytes(),
+        );
+    }
+}
+
+/// Pinned first, then most-opened, then NetEase play count and update time.
+fn ordered_library_playlists(items: &[netease::PlaylistDto]) -> Vec<netease::PlaylistDto> {
+    let state = playlist_state()
+        .lock()
+        .map(|state| state.clone())
+        .unwrap_or_default();
+    let mut list = items.to_vec();
+    list.sort_by(|a, b| {
+        let a_pinned = playlist_is_pinned(&state, &a.id);
+        let b_pinned = playlist_is_pinned(&state, &b.id);
+        let a_usage = state.usage.get(&a.id).copied().unwrap_or(0);
+        let b_usage = state.usage.get(&b.id).copied().unwrap_or(0);
+        b_pinned
+            .cmp(&a_pinned)
+            .then_with(|| b_usage.cmp(&a_usage))
+            .then_with(|| b.play_count.cmp(&a.play_count))
+            .then_with(|| b.update_time.cmp(&a.update_time))
+    });
+    list
+}
+
+/// The reference client keeps at least eight common playlists, plus all
+/// pinned entries when the user pinned more than eight.
+fn playlist_common_count(items: &[netease::PlaylistDto]) -> i32 {
+    let state = playlist_state()
+        .lock()
+        .map(|state| state.clone())
+        .unwrap_or_default();
+    let pinned = items
+        .iter()
+        .filter(|item| playlist_is_pinned(&state, &item.id))
+        .count();
+    pinned.max(8) as i32
+}
+
+fn library_visible_playlists(
+    ordered: &[netease::PlaylistDto],
+    expanded: bool,
+) -> Vec<PlaylistItem> {
+    if expanded {
+        return library_playlist_items(ordered);
+    }
+    let common = playlist_common_count(ordered).max(0) as usize;
+    library_playlist_items(&ordered[..ordered.len().min(common)])
+}
+
+fn library_playlist_items(items: &[netease::PlaylistDto]) -> Vec<PlaylistItem> {
+    let state = playlist_state()
+        .lock()
+        .map(|state| state.clone())
+        .unwrap_or_default();
+    items
+        .iter()
+        .map(|playlist| PlaylistItem {
+            id: playlist.id.clone().into(),
+            title: playlist.name.clone().into(),
+            meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
+            cover: Image::default(),
+            tint: color_for(&playlist.id),
+            pinned: playlist_is_pinned(&state, &playlist.id),
+        })
+        .collect()
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
@@ -983,6 +1155,7 @@ fn save_prefs(prefs: &Prefs) {
         "lowPower": prefs.low_power,
         "showTranslation": prefs.show_translation,
         "coverAccent": prefs.cover_accent,
+        "theme": prefs.theme,
     });
     let _ = write_atomic(&path, payload.to_string().as_bytes());
 }
@@ -1395,7 +1568,13 @@ fn start_track(
     let media_artist = artist.clone();
     let media_album = album.clone();
     let prefs_snapshot = prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
-    let selected_quality = prefs_snapshot.quality.clone();
+    let quality_override = track_quality_map()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&track.id).cloned());
+    let selected_quality = quality_override
+        .clone()
+        .unwrap_or_else(|| prefs_snapshot.quality.clone());
     let requested_quality = if selected_quality == "auto" {
         auto_quality(&track.quality).to_string()
     } else {
@@ -1415,6 +1594,9 @@ fn start_track(
     let cover_track_id = track.id.clone();
     let audio_track_id = track.id.clone();
     let audio_album_id = track.album_id.clone();
+    let artist_id = track.artist_id.clone();
+    let album_id = track.album_id.clone();
+    let quality_override_text = quality_override.unwrap_or_default();
     let cover_endpoint = cover_url(&track.cover_url, 500);
     let liked = liked_ids()
         .lock()
@@ -1426,7 +1608,13 @@ fn start_track(
         ui.set_current_title(title.into());
         ui.set_current_artist(artist.into());
         ui.set_current_album(album.into());
+        ui.set_current_artist_id(artist_id.into());
+        ui.set_current_album_id(album_id.into());
         ui.set_current_quality(quality_text.into());
+        ui.set_current_track_quality(quality_override_text.into());
+        ui.set_player_menu_open(false);
+        ui.set_detail_more_open(false);
+        ui.set_detail_track_menu_id("".into());
         ui.set_position_text(format_clock(resume_at).into());
         ui.set_duration_text(format_clock(duration).into());
         ui.set_current_cover(cover);
@@ -1789,6 +1977,7 @@ fn load_home(
                         },
                         cover: Image::default(),
                         tint: daily_tint,
+                        pinned: false,
                     });
                     if let Some(playlist) = &feature_dto {
                         ui.set_feature_playlist(PlaylistItem {
@@ -1798,6 +1987,7 @@ fn load_home(
                                 .into(),
                             cover: Image::default(),
                             tint: color_for(&playlist.id),
+                            pinned: false,
                         });
                     }
                     let _ = recommended_count;
@@ -1921,8 +2111,10 @@ fn load_library(
                     .unwrap_or_default();
                 library.recent = merge_recent(&local, &library.recent);
                 let library_error = library.error.clone();
+                let ordered_playlists = ordered_library_playlists(&library.playlists);
+                let common_count = playlist_common_count(&ordered_playlists);
                 if let Ok(mut catalog) = catalog.lock() {
-                    catalog.library_playlists = library.playlists.clone();
+                    catalog.library_playlists = ordered_playlists.clone();
                     catalog.library_recent = library.recent.clone();
                 }
                 let likes_pending = like_inflight()
@@ -1937,11 +2129,14 @@ fn load_library(
                     }
                 }
                 let recent_covers = library.recent.clone();
-                let all_playlists = library.playlists.clone();
+                let all_playlists = ordered_playlists.clone();
                 update_ui(&ui, move |ui| {
+                    let expanded = ui.get_library_playlists_expanded();
                     ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(
-                        playlist_items_for_ui(&library.playlists),
+                        library_visible_playlists(&ordered_playlists, expanded),
                     ))));
+                    ui.set_library_common_count(common_count);
+                    ui.set_library_playlists_total(ordered_playlists.len() as i32);
                     ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(
                         track_items_for_ui(&library.recent),
                     ))));
@@ -2095,6 +2290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_low_power(snapshot.low_power);
     ui.set_show_translation(snapshot.show_translation);
     ui.set_cover_accent(snapshot.cover_accent);
+    ui.set_dark_mode(snapshot.theme != "light");
     let _ = audio.tx.send(AudioCmd::Volume(snapshot.volume));
     ui.set_data_dir(paths::data_dir().display().to_string().into());
     ui.set_ambient_background(ambient_background());
@@ -2104,6 +2300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         meta: "登录后同步每日推荐".into(),
         cover: Image::default(),
         tint: Color::from_rgb_u8(201, 32, 39),
+        pinned: false,
     });
     ui.set_feature_playlist(PlaylistItem {
         id: "".into(),
@@ -2111,6 +2308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         meta: "登录后获取推荐歌单".into(),
         cover: Image::default(),
         tint: Color::from_rgb_u8(60, 40, 80),
+        pinned: false,
     });
     let log_level = fs::read_to_string(paths::data_dir().join("log-level"))
         .unwrap_or_default()
@@ -2541,6 +2739,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(
                         Vec::<TrackItem>::new(),
                     ))));
+                    ui.set_library_playlists_expanded(false);
+                    ui.set_library_common_count(8);
+                    ui.set_library_playlists_total(0);
                     ui.set_search_text("".into());
                     ui.set_search_query("".into());
                     ui.set_search_loading(false);
@@ -2580,6 +2781,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         meta: "登录后同步每日推荐".into(),
                         cover: Image::default(),
                         tint: Color::from_rgb_u8(201, 32, 39),
+                        pinned: false,
                     });
                     ui.set_feature_playlist(PlaylistItem {
                         id: "".into(),
@@ -2587,6 +2789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         meta: "登录后获取推荐歌单".into(),
                         cover: Image::default(),
                         tint: Color::from_rgb_u8(60, 40, 80),
+                        pinned: false,
                     });
                     switch_page(ui, "home");
                     ui.set_status_text(
@@ -2837,6 +3040,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
+        let weak = weak.clone();
+        let catalog = catalog.clone();
+        ui.on_toggle_playlist_pin(move |id| {
+            let id = id.to_string();
+            let mut pinned_now = false;
+            if let Ok(mut state) = playlist_state().lock() {
+                if let Some(position) = state.pinned.iter().position(|item| item == &id) {
+                    state.pinned.remove(position);
+                } else {
+                    state.pinned.push(id.clone());
+                    pinned_now = true;
+                }
+                save_playlist_state(&state);
+            }
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let playlists = catalog
+                .lock()
+                .map(|catalog| catalog.library_playlists.clone())
+                .unwrap_or_default();
+            let ordered = ordered_library_playlists(&playlists);
+            let state_snapshot = playlist_state()
+                .lock()
+                .map(|state| state.clone())
+                .unwrap_or_default();
+            let mut covers = std::collections::HashMap::<String, Image>::new();
+            let current = ui.get_library_playlists();
+            for index in 0..current.row_count() {
+                if let Some(item) = current.row_data(index) {
+                    covers.insert(item.id.to_string(), item.cover.clone());
+                }
+            }
+            let mut items = ordered
+                .iter()
+                .map(|playlist| PlaylistItem {
+                    id: playlist.id.clone().into(),
+                    title: playlist.name.clone().into(),
+                    meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
+                    cover: covers.remove(&playlist.id).unwrap_or_default(),
+                    tint: color_for(&playlist.id),
+                    pinned: playlist_is_pinned(&state_snapshot, &playlist.id),
+                })
+                .collect::<Vec<_>>();
+            if !ui.get_library_playlists_expanded() {
+                let common = playlist_common_count(&ordered).max(0) as usize;
+                items.truncate(common);
+            }
+            if let Ok(mut catalog) = catalog.lock() {
+                catalog.library_playlists = ordered.clone();
+            }
+            ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(items))));
+            ui.set_library_common_count(playlist_common_count(&ordered));
+            ui.set_library_playlists_total(ordered.len() as i32);
+            set_status_temp(
+                &ui,
+                if pinned_now {
+                    "已置顶歌单".to_string()
+                } else {
+                    "已取消置顶".to_string()
+                },
+                Duration::from_millis(2000),
+            );
+        });
+    }
+
+    {
+        let runtime = runtime.clone();
+        let state = state.clone();
+        let weak = weak.clone();
+        let catalog = catalog.clone();
+        ui.on_toggle_library_playlists(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let expanded = !ui.get_library_playlists_expanded();
+            ui.set_library_playlists_expanded(expanded);
+            let playlists = catalog
+                .lock()
+                .map(|catalog| catalog.library_playlists.clone())
+                .unwrap_or_default();
+            let ordered = ordered_library_playlists(&playlists);
+            ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(
+                library_visible_playlists(&ordered, expanded),
+            ))));
+            ui.set_library_common_count(playlist_common_count(&ordered));
+            ui.set_library_playlists_total(ordered.len() as i32);
+            if expanded {
+                runtime.spawn(load_playlist_covers(
+                    state.clone(),
+                    weak.clone(),
+                    PlaylistTarget::Library,
+                    ordered,
+                    200,
+                ));
+            }
+        });
+    }
+
+    {
         let runtime = runtime.clone();
         let state = state.clone();
         let weak = weak.clone();
@@ -2853,6 +3156,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let detail_history = detail_history.clone();
             let detail_generation = detail_generation.clone();
             let id = id.to_string();
+            if let Ok(mut usage) = playlist_state().lock() {
+                *usage.usage.entry(id.clone()).or_insert(0) += 1;
+                save_playlist_state(&usage);
+            }
             if let Some(ui) = weak.upgrade() {
                 let page = ui.get_page().to_string();
                 let existing_origin = ui.get_detail_origin().to_string();
@@ -3319,7 +3626,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
+        let runtime = runtime.clone();
+        let state = state.clone();
         let weak = weak.clone();
+        let catalog = catalog.clone();
         let detail_history = detail_history.clone();
         let detail_generation = detail_generation.clone();
         ui.on_back_detail(move || {
@@ -3349,6 +3659,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let origin = ui.get_detail_origin().to_string();
                 ui.set_detail_kind("".into());
                 switch_page(&ui, if origin.is_empty() { "home" } else { &origin });
+                if origin == "library" {
+                    load_library(&runtime, state.clone(), weak.clone(), catalog.clone());
+                }
             } else {
                 ui.set_detail_kind("".into());
                 switch_page(&ui, "home");
@@ -4090,6 +4403,291 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
+        let weak = weak.clone();
+        let prefs = prefs.clone();
+        ui.on_set_theme(move |value| {
+            let theme = if value.as_str() == "light" {
+                "light"
+            } else {
+                "dark"
+            };
+            if let Ok(mut prefs) = prefs.lock() {
+                prefs.theme = theme.to_string();
+                save_prefs(&prefs);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_dark_mode(theme == "dark");
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.on_copy_song_info(move |text| {
+            if let Some(ui) = weak.upgrade() {
+                let copied = media::copy_text(text.as_str());
+                set_status_temp(
+                    &ui,
+                    if copied {
+                        "已复制歌曲信息".to_string()
+                    } else {
+                        "复制失败，请检查剪贴板".to_string()
+                    },
+                    Duration::from_millis(2200),
+                );
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.on_copy_detail_link(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let kind = ui.get_detail_kind().to_string();
+            let id = ui.get_detail_id().to_string();
+            let Some(url) = detail_share_url(&kind, &id) else {
+                set_status_temp(
+                    &ui,
+                    "当前页面没有可分享的链接".to_string(),
+                    Duration::from_millis(2200),
+                );
+                return;
+            };
+            let copied = media::copy_text(&url);
+            set_status_temp(
+                &ui,
+                if copied {
+                    "已复制链接".to_string()
+                } else {
+                    "复制失败，请检查剪贴板".to_string()
+                },
+                Duration::from_millis(2200),
+            );
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.on_open_detail_link(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let kind = ui.get_detail_kind().to_string();
+            let id = ui.get_detail_id().to_string();
+            let Some(url) = detail_share_url(&kind, &id) else {
+                set_status_temp(
+                    &ui,
+                    "当前页面没有可打开的链接".to_string(),
+                    Duration::from_millis(2200),
+                );
+                return;
+            };
+            if !open_external_url(&url) {
+                set_status_temp(
+                    &ui,
+                    "无法打开浏览器".to_string(),
+                    Duration::from_millis(2200),
+                );
+            }
+        });
+    }
+
+    {
+        let runtime = runtime.clone();
+        let state = state.clone();
+        let weak = weak.clone();
+        ui.on_toggle_track_like(move |id| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if !ui.get_logged_in() {
+                set_status_temp(
+                    &ui,
+                    "登录后才能喜欢歌曲".to_string(),
+                    Duration::from_millis(2200),
+                );
+                return;
+            }
+            let id = id.to_string();
+            if id.is_empty() {
+                return;
+            }
+            let already_pending = like_inflight()
+                .lock()
+                .map(|mut set| !set.insert(id.clone()))
+                .unwrap_or(false);
+            if already_pending {
+                return;
+            }
+            let liked = liked_ids()
+                .lock()
+                .map(|set| set.contains(&id))
+                .unwrap_or(false);
+            let runtime = runtime.clone();
+            let state = state.clone();
+            let weak = weak.clone();
+            let epoch = state.session_epoch();
+            runtime.spawn(async move {
+                let result = netease::like_song(&state, id.clone(), !liked).await;
+                if let Ok(mut set) = like_inflight().lock() {
+                    set.remove(&id);
+                }
+                if state.session_epoch() != epoch {
+                    return;
+                }
+                match result {
+                    Ok(result) => {
+                        if let Ok(mut set) = liked_ids().lock() {
+                            if result.liked {
+                                set.insert(id.clone());
+                            } else {
+                                set.remove(&id);
+                            }
+                        }
+                        update_ui(&weak, move |ui| {
+                            if ui.get_current_id().as_str() == id.as_str() {
+                                ui.set_current_liked(result.liked);
+                            }
+                            set_status_temp(
+                                &ui,
+                                if result.liked {
+                                    "已添加到我喜欢的音乐".to_string()
+                                } else {
+                                    "已取消喜欢".to_string()
+                                },
+                                Duration::from_millis(2200),
+                            );
+                        });
+                    }
+                    Err(error) => update_ui(&weak, move |ui| {
+                        set_status_temp(&ui, error, Duration::from_millis(3200))
+                    }),
+                }
+            });
+        });
+    }
+
+    {
+        let runtime = runtime.clone();
+        let state = state.clone();
+        let prefs = prefs.clone();
+        let weak = weak.clone();
+        let audio = audio.clone();
+        let player = player.clone();
+        let lyrics = lyrics.clone();
+        let generation = generation.clone();
+        ui.on_set_track_quality(move |value| {
+            let value = value.to_string();
+            let level = if value.is_empty() {
+                String::new()
+            } else {
+                normalize_quality(&value).to_string()
+            };
+            let current_track_id = player
+                .lock()
+                .ok()
+                .and_then(|player| player.current.as_ref().map(|track| track.id.clone()));
+            if let (Some(track_id), Ok(mut map)) = (current_track_id, track_quality_map().lock()) {
+                if level.is_empty() {
+                    map.remove(&track_id);
+                } else {
+                    map.insert(track_id, level.clone());
+                }
+                save_track_quality(&map);
+            }
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            ui.set_current_track_quality(level.clone().into());
+            set_status_temp(
+                &ui,
+                if level.is_empty() {
+                    "本曲音质已跟随全局设置".to_string()
+                } else {
+                    format!("本曲音质：{}", quality_label(&level))
+                },
+                Duration::from_millis(2200),
+            );
+            let Some(track) = player.lock().ok().and_then(|player| player.current.clone()) else {
+                return;
+            };
+            let position = current_position(&audio, &player, &generation);
+            if let Ok(mut player) = player.lock() {
+                player.resume_position = position.max(0.0);
+            }
+            start_track(
+                &runtime,
+                state.clone(),
+                weak.clone(),
+                audio.clone(),
+                player.clone(),
+                lyrics.clone(),
+                generation.clone(),
+                prefs.clone(),
+                track,
+                ui.get_playing(),
+            );
+        });
+    }
+
+    {
+        let runtime = runtime.clone();
+        let state = state.clone();
+        let weak = weak.clone();
+        let catalog = catalog.clone();
+        let audio = audio.clone();
+        let player = player.clone();
+        let lyrics = lyrics.clone();
+        let generation = generation.clone();
+        let prefs = prefs.clone();
+        ui.on_play_detail_shuffle(move || {
+            use rand::seq::SliceRandom;
+            let mut tracks = catalog
+                .lock()
+                .map(|catalog| catalog.detail.clone())
+                .unwrap_or_default();
+            if tracks.is_empty() {
+                if let Some(ui) = weak.upgrade() {
+                    set_status_temp(
+                        &ui,
+                        "当前列表没有可播放的歌曲".to_string(),
+                        Duration::from_millis(2200),
+                    );
+                }
+                return;
+            }
+            tracks.shuffle(&mut rand::thread_rng());
+            let first = tracks[0].clone();
+            {
+                let Ok(mut player) = player.lock() else {
+                    return;
+                };
+                player.queue = tracks;
+                player.index = 0;
+                player.current = Some(first.clone());
+                player.resume_position = 0.0;
+            }
+            start_track(
+                &runtime,
+                state.clone(),
+                weak.clone(),
+                audio.clone(),
+                player.clone(),
+                lyrics.clone(),
+                generation.clone(),
+                prefs.clone(),
+                first,
+                true,
+            );
+            if let Some(ui) = weak.upgrade() {
+                set_status_temp(&ui, "随机播放".to_string(), Duration::from_millis(1600));
+            }
+        });
+    }
+
+    {
         let runtime = runtime.clone();
         let state = state.clone();
         let prefs = prefs.clone();
@@ -4419,6 +5017,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &generation,
                     &prefs,
                 ),
+                Some(media::MediaCommand::Seek(value)) => {
+                    let value = value.clamp(0.0, ui.get_duration().max(0.01));
+                    let token = generation.load(Ordering::Relaxed);
+                    let loaded = audio
+                        .snapshot
+                        .lock()
+                        .map(|snapshot| snapshot.loaded && snapshot.token == token)
+                        .unwrap_or(false);
+                    if !loaded {
+                        if let Ok(mut player) = player.lock() {
+                            player.resume_position = value.max(0.0);
+                        }
+                    }
+                    let _ = audio.tx.send(AudioCmd::Seek { value, token });
+                    ui.set_progress(value);
+                    ui.set_position_text(format_clock(value).into());
+                    ui.set_lyric_follow(true);
+                }
                 None => {}
             }
 
@@ -4588,7 +5204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::playlist_id_from_input;
+    use super::{detail_share_url, playlist_id_from_input};
 
     #[test]
     fn playlist_id_accepts_plain_numbers() {
@@ -4611,5 +5227,27 @@ mod tests {
     fn playlist_id_rejects_invalid_text() {
         assert_eq!(playlist_id_from_input("not a playlist"), None);
         assert_eq!(playlist_id_from_input(""), None);
+    }
+
+    #[test]
+    fn detail_links_are_restricted_to_numeric_ids() {
+        assert_eq!(
+            detail_share_url("playlist", "123").as_deref(),
+            Some("https://music.163.com/#/playlist?id=123")
+        );
+        assert_eq!(
+            detail_share_url("artist", "456").as_deref(),
+            Some("https://music.163.com/#/artist?id=456")
+        );
+        assert_eq!(
+            detail_share_url("album", "789").as_deref(),
+            Some("https://music.163.com/#/album?id=789")
+        );
+        assert_eq!(detail_share_url("playlist", ""), None);
+        assert_eq!(detail_share_url("playlist", "../evil"), None);
+        assert_eq!(
+            detail_share_url("daily", "daily").as_deref(),
+            Some("https://music.163.com/#/discover/recommend")
+        );
     }
 }
