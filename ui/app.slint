@@ -1,4 +1,4 @@
-import { ScrollView, Palette } from "std-widgets.slint";
+import { ScrollView, ListView, Palette } from "std-widgets.slint";
 
 export struct TrackItem {
     id: string,
@@ -23,6 +23,11 @@ export struct LyricItem {
     time: float,
     text: string,
     translation: string,
+}
+
+export struct LyricResultItem {
+    track: TrackItem,
+    lines: string,
 }
 
 // ── Small building blocks ────────────────────────────────────────────────
@@ -183,7 +188,6 @@ component FlyingControl inherits Rectangle {
         glyph-size: root.icon-size;
         tint: root.tint;
     }
-    TouchArea { }
     animate x, y, width, height, border-radius, icon-size { duration: 380ms; easing: ease-out; }
     animate background { duration: 380ms; easing: ease-out; }
 }
@@ -194,11 +198,13 @@ component RoundIconButton inherits Rectangle {
     in property <length> button-size: 62px;
     in property <color> background-color: #ffffff21;
     in property <color> tint: #ffffff;
+    in property <bool> enabled: true;
     callback clicked();
     width: root.button-size;
     height: root.button-size;
     border-radius: self.width / 2;
     background: tap.has-hover ? #ffffff30 : root.background-color;
+    opacity: root.enabled ? 1 : 0.55;
     transform-scale-x: tap.pressed ? 92% : (tap.has-hover ? 105% : 100%);
     transform-scale-y: tap.pressed ? 92% : (tap.has-hover ? 105% : 100%);
     animate background { duration: 140ms; }
@@ -210,7 +216,10 @@ component RoundIconButton inherits Rectangle {
         glyph-size: root.icon-size;
         tint: root.tint;
     }
-    tap := TouchArea { clicked => { root.clicked(); } }
+    tap := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
 }
 
 // ── Content components ───────────────────────────────────────────────────
@@ -414,6 +423,43 @@ component MediaRow inherits Rectangle {
     tap := TouchArea { clicked => { root.clicked(); } }
 }
 
+component LyricResultRow inherits Rectangle {
+    in property <LyricResultItem> item;
+    callback clicked();
+    height: 88px;
+    border-radius: 16px;
+    clip: true;
+    background: tap.has-hover ? #232326 : #17171a;
+    animate background { duration: 150ms; }
+    HorizontalLayout {
+        padding: 10px;
+        spacing: 14px;
+        cross-axis-alignment: center;
+        Rectangle {
+            width: 52px;
+            height: 52px;
+            border-radius: 12px;
+            background: root.item.track.tint;
+            clip: true;
+            Image { width: 100%; height: 100%; source: root.item.track.cover; image-fit: cover; }
+            if root.item.track.cover.width == 0 : Text {
+                x: 0; y: 0; width: 100%; height: 100%;
+                text: "♪"; color: #ffffff77; font-size: 20px;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
+            alignment: center;
+            Text { text: root.item.track.title; color: #f5f5f7; font-size: 14px; font-weight: 600; overflow: elide; }
+            Text { text: root.item.track.artist; color: #8e8e93; font-size: 11px; overflow: elide; }
+            Text { text: root.item.lines; color: #b8b8bf; font-size: 12px; overflow: elide; }
+        }
+    }
+    tap := TouchArea { clicked => { root.clicked(); } }
+}
+
 component PlaylistRow inherits Rectangle {
     in property <PlaylistItem> item;
     in property <bool> circle;
@@ -502,7 +548,11 @@ component DetailRow inherits Rectangle {
 component SearchField inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder: "搜索歌曲、歌手、歌单";
+    in property <int> focus-tick: 0;
     callback accepted();
+    public function focus-input() { input.focus(); }
+    init => { input.focus(); }
+    changed focus-tick => { input.focus(); }
     height: 64px;
     border-radius: 32px;
     background: #1b1c1e;
@@ -547,6 +597,7 @@ component SearchField inherits Rectangle {
             label: "搜索";
             width: 68px;
             primary: true;
+            disabled: root.text.is-empty;
             clicked => { root.accepted(); }
         }
     }
@@ -697,6 +748,63 @@ component VolumeBar inherits Rectangle {
     }
 }
 
+// ── Lyric view ───────────────────────────────────────────────────────────
+
+component LyricView inherits Flickable {
+    in property <[LyricItem]> lines;
+    in property <int> current;
+    in property <length> line-height: 64px;
+    in property <length> verse-padding;
+    in property <bool> show-translation;
+    in-out property <length> scroll-target;
+    callback line-clicked(int, float);
+    callback height-changed(length);
+    callback user-scrolled(length);
+
+    content-width: self.width;
+    content-height: 2 * root.verse-padding + root.lines.length * root.line-height;
+    // `scroll-target` is a positive scrollTop; Flickable content-y is the
+    // negative position of the content.
+    content-y: -root.scroll-target;
+    changed scroll-target => { self.content-y = -root.scroll-target; }
+    changed height => { root.height-changed(self.height); }
+    init => { root.height-changed(self.height); }
+    flicked => { root.user-scrolled(-self.content-y); }
+
+    for line[index] in root.lines : Rectangle {
+        y: root.verse-padding + index * root.line-height;
+        width: parent.width;
+        height: root.line-height;
+        background: line-tap.has-hover ? #ffffff08 : transparent;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text {
+                horizontal-stretch: 1;
+                text: line.text;
+                color: index == root.current ? #ffffff : #ffffff78;
+                font-size: index == root.current ? 38px : 23px;
+                font-weight: index == root.current ? 700 : 400;
+                horizontal-alignment: center;
+                overflow: elide;
+                animate color { duration: 180ms; }
+            }
+            if line.translation != "" && root.show-translation : Text {
+                horizontal-stretch: 1;
+                text: line.translation;
+                color: index == root.current ? #ffffffa8 : #ffffff66;
+                font-size: index == root.current ? 15px : 12px;
+                horizontal-alignment: center;
+                overflow: elide;
+                animate color { duration: 180ms; }
+            }
+        }
+        line-tap := TouchArea {
+            clicked => { root.line-clicked(index, line.time); }
+        }
+    }
+}
+
 // ── Window ───────────────────────────────────────────────────────────────
 
 export component AppWindow inherits Window {
@@ -704,8 +812,10 @@ export component AppWindow inherits Window {
     resize-border-width: 6px;
     title: "Decro";
     icon: @image-url("../assets/icon.png");
-    width: 1200px;
-    height: 760px;
+    preferred-width: 1200px;
+    preferred-height: 760px;
+    min-width: 960px;
+    min-height: 640px;
     background: #000000;
     default-font-family: "Segoe UI";
     init => { Palette.color-scheme = ColorScheme.dark; }
@@ -715,6 +825,7 @@ export component AppWindow inherits Window {
     private property <length> sidebar-width: 76px;
     private property <length> lyric-line-height: 64px;
     private property <length> lyric-view-height: 430px;
+    private property <length> lyric-padding: max(0px, (root.lyric-view-height - root.lyric-line-height) / 2);
 
     // Account / session
     in property <bool> logged-in;
@@ -750,7 +861,6 @@ export component AppWindow inherits Window {
     in property <string> detail-description: "";
     in property <string> detail-first-id: "";
     in property <color> detail-cover-tint: #17171a;
-    in property <image> detail-cover-image;
     in property <image> detail-backdrop;
     in property <[PlaylistItem]> detail-albums;
     in property <bool> detail-subscribed;
@@ -761,8 +871,15 @@ export component AppWindow inherits Window {
     in property <[PlaylistItem]> search-playlists;
     in property <[PlaylistItem]> search-artists;
     in property <[PlaylistItem]> search-albums;
+    in property <[LyricResultItem]> search-lyrics;
     in-out property <string> search-kind: "song";
     in-out property <string> search-text: "";
+    in property <string> search-query: "";
+    in property <bool> search-loading;
+    in-out property <int> search-focus-tick;
+    private property <bool> search-active: !root.search-text.is-empty
+        && root.search-query == root.search-text
+        && !root.search-loading;
     in-out property <bool> playlist-dialog-open;
     in-out property <string> playlist-dialog-mode: "create";
     in-out property <string> playlist-dialog-text: "";
@@ -814,9 +931,13 @@ export component AppWindow inherits Window {
     out property <length> lyric-target-y: root.lyric-y-for(root.lyric-index);
 
     pure function lyric-y-for(index: int) -> length {
+        // `lyric-scroll-y` is a positive scroll offset. The Flickable's
+        // `content-y` is the negative position of the content, so callers bind
+        // it to `-lyric-scroll-y`. The padding accounts for the first and last
+        // line so those can also be centered.
         return max(0px, min(
-            index * root.lyric-line-height - (root.lyric-view-height - root.lyric-line-height) / 2,
-            root.lyrics.length * root.lyric-line-height - root.lyric-view-height
+            index * root.lyric-line-height,
+            max(0px, (root.lyrics.length - 1) * root.lyric-line-height)
         ));
     }
 
@@ -825,7 +946,7 @@ export component AppWindow inherits Window {
     callback close-login();
     callback logout();
     callback nav(string);
-    callback search(string);
+    callback search(string, string);
     callback open-playlist(string);
     callback open-daily();
     callback open-artist(string);
@@ -835,7 +956,7 @@ export component AppWindow inherits Window {
     callback open-playlist-dialog(string);
     callback close-playlist-dialog();
     callback submit-playlist-dialog(string);
-    callback play-track(string);
+    callback play-track(string, string);
     callback play-detail(string);
     callback toggle-play();
     callback toggle-like();
@@ -887,11 +1008,11 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 padding-left: 18px;
                 padding-right: 10px;
-                spacing: 14px;
+                spacing: 10px;
                 cross-axis-alignment: center;
 
                 HorizontalLayout {
-                    width: 184px;
+                    width: 150px;
                     spacing: 9px;
                     cross-axis-alignment: center;
                     Image {
@@ -921,7 +1042,7 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle {
-                    width: 400px;
+                    width: 310px;
                     height: 30px;
                     border-radius: 9px;
                     background: search-trigger-tap.has-hover ? #ffffff12 : #ffffff09;
@@ -945,14 +1066,19 @@ export component AppWindow inherits Window {
                             Text { text: "Ctrl K"; color: #8e8e93; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
-                    search-trigger-tap := TouchArea { clicked => { root.nav("search"); } }
+                    search-trigger-tap := TouchArea {
+                        clicked => {
+                            root.nav("search");
+                            root.search-focus-tick += 1;
+                        }
+                    }
                 }
 
                 Rectangle { horizontal-stretch: 1; }
 
                 Rectangle {
                     height: 30px;
-                    width: 120px;
+                    width: 110px;
                     border-radius: 15px;
                     background: account-tap.has-hover ? #ffffff0d : transparent;
                     HorizontalLayout {
@@ -1165,7 +1291,7 @@ export component AppWindow inherits Window {
                                     x: index * 192px;
                                     y: 0;
                                     item: track;
-                                    clicked => { root.play-track(track.id); }
+                                    clicked => { root.play-track(track.id, "new"); }
                                 }
                             }
                         }
@@ -1187,7 +1313,7 @@ export component AppWindow inherits Window {
                                     x: index * 192px;
                                     y: 0;
                                     item: track;
-                                    clicked => { root.play-track(track.id); }
+                                    clicked => { root.play-track(track.id, "recent"); }
                                 }
                             }
                         }
@@ -1230,7 +1356,7 @@ export component AppWindow inherits Window {
                                     x: index * 192px;
                                     y: 0;
                                     item: track;
-                                    clicked => { root.play-track(track.id); }
+                                    clicked => { root.play-track(track.id, "recent"); }
                                 }
                             }
                         }
@@ -1262,7 +1388,7 @@ export component AppWindow inherits Window {
                                     x: index * 192px;
                                     y: 0;
                                     item: track;
-                                    clicked => { root.play-track(track.id); }
+                                    clicked => { root.play-track(track.id, "daily"); }
                                 }
                             }
                         }
@@ -1278,7 +1404,7 @@ export component AppWindow inherits Window {
                                     x: index * 192px;
                                     y: 0;
                                     item: track;
-                                    clicked => { root.play-track(track.id); }
+                                    clicked => { root.play-track(track.id, "new"); }
                                 }
                             }
                         }
@@ -1360,7 +1486,7 @@ export component AppWindow inherits Window {
                                 for track in root.library-tracks : MediaRow {
                                     item: track;
                                     current: track.id == root.current-id;
-                                    clicked => { root.play-track(track.id); }
+                                    clicked => { root.play-track(track.id, "library-recent"); }
                                 }
                             }
                         }
@@ -1395,7 +1521,8 @@ export component AppWindow inherits Window {
                         SearchField {
                             text <=> root.search-text;
                             placeholder: "搜索歌曲、歌手、歌单、专辑";
-                            accepted => { root.search(root.search-text); }
+                            focus-tick: root.search-focus-tick;
+                            accepted => { root.search(root.search-text, root.search-kind); }
                         }
 
                         HorizontalLayout {
@@ -1404,6 +1531,7 @@ export component AppWindow inherits Window {
                             PillButton { label: "歌单"; width: 84px; primary: root.search-kind == "playlist"; clicked => { root.search-kind = "playlist"; } }
                             PillButton { label: "歌手"; width: 84px; primary: root.search-kind == "artist"; clicked => { root.search-kind = "artist"; } }
                             PillButton { label: "专辑"; width: 84px; primary: root.search-kind == "album"; clicked => { root.search-kind = "album"; } }
+                            PillButton { label: "歌词"; width: 84px; primary: root.search-kind == "lyric"; clicked => { root.search-kind = "lyric"; } }
                         }
 
                         if root.search-text.is-empty : Text {
@@ -1412,7 +1540,19 @@ export component AppWindow inherits Window {
                             font-size: 13px;
                         }
 
-                        if root.search-kind == "song" && root.search-tracks.length > 0 : VerticalLayout {
+                        if root.search-loading : Text {
+                            text: "正在搜索…";
+                            color: #77777d;
+                            font-size: 13px;
+                        }
+
+                        if !root.search-text.is-empty && !root.search-loading && !root.search-active : Text {
+                            text: "按回车或点击“搜索”开始检索。";
+                            color: #77777d;
+                            font-size: 13px;
+                        }
+
+                        if root.search-active && root.search-kind == "song" && root.search-tracks.length > 0 : VerticalLayout {
                             spacing: 10px;
                             Text { text: "歌曲"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
                             VerticalLayout {
@@ -1420,12 +1560,12 @@ export component AppWindow inherits Window {
                                 for track in root.search-tracks : MediaRow {
                                     item: track;
                                     current: track.id == root.current-id;
-                                    clicked => { root.play-track(track.id); }
+                                    clicked => { root.play-track(track.id, "search"); }
                                 }
                             }
                         }
 
-                        if root.search-kind == "playlist" && root.search-playlists.length > 0 : VerticalLayout {
+                        if root.search-active && root.search-kind == "playlist" && root.search-playlists.length > 0 : VerticalLayout {
                             spacing: 12px;
                             Text { text: "歌单"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
                             Flickable {
@@ -1441,7 +1581,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.search-kind == "artist" && root.search-artists.length > 0 : VerticalLayout {
+                        if root.search-active && root.search-kind == "artist" && root.search-artists.length > 0 : VerticalLayout {
                             spacing: 10px;
                             Text { text: "歌手"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
                             VerticalLayout {
@@ -1454,7 +1594,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.search-kind == "album" && root.search-albums.length > 0 : VerticalLayout {
+                        if root.search-active && root.search-kind == "album" && root.search-albums.length > 0 : VerticalLayout {
                             spacing: 10px;
                             Text { text: "专辑"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
                             VerticalLayout {
@@ -1466,11 +1606,24 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if !root.search-text.is-empty
+                        if root.search-active && root.search-kind == "lyric" && root.search-lyrics.length > 0 : VerticalLayout {
+                            spacing: 10px;
+                            Text { text: "歌词"; color: #f5f5f7; font-size: 20px; font-weight: 700; }
+                            VerticalLayout {
+                                spacing: 6px;
+                                for item in root.search-lyrics : LyricResultRow {
+                                    item: item;
+                                    clicked => { root.play-track(item.track.id, "search-lyric"); }
+                                }
+                            }
+                        }
+
+                        if root.search-active
                             && ((root.search-kind == "song" && root.search-tracks.length == 0)
                                 || (root.search-kind == "playlist" && root.search-playlists.length == 0)
                                 || (root.search-kind == "artist" && root.search-artists.length == 0)
-                                || (root.search-kind == "album" && root.search-albums.length == 0)) : Text {
+                                || (root.search-kind == "album" && root.search-albums.length == 0)
+                                || (root.search-kind == "lyric" && root.search-lyrics.length == 0)) : Text {
                             text: "没有找到相关结果，换个关键词试试。";
                             color: #77777d;
                             font-size: 13px;
@@ -1509,7 +1662,7 @@ export component AppWindow inherits Window {
                             for track in root.recent-tracks : MediaRow {
                                 item: track;
                                 current: track.id == root.current-id;
-                                clicked => { root.play-track(track.id); }
+                                clicked => { root.play-track(track.id, "recent"); }
                             }
                         }
                     }
@@ -1638,7 +1791,7 @@ export component AppWindow inherits Window {
                                 height: 236px;
                                 content-width: root.detail-albums.length * 192px;
                                 content-height: self.height;
-                                for item[index] in root.detail-albums : FeatureCard {
+                                for item[index] in root.detail-albums : ShelfCard {
                                     x: index * 192px;
                                     y: 0;
                                     item: item;
@@ -1672,7 +1825,7 @@ export component AppWindow inherits Window {
                             spacing: 0px;
                             Rectangle { horizontal-stretch: 1; }
                             Rectangle {
-                                width: 980px;
+                                width: min(980px, root.width - root.sidebar-width - 60px);
                                 background: #1b1c1e;
                                 border-radius: 24px;
                             border-width: 1px;
@@ -1709,8 +1862,8 @@ export component AppWindow inherits Window {
 
                                 Text { text: "个性化"; color: #8e8e93; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
                                 SettingsToggleRow {
-                                    title: "封面取色";
-                                    description: "让播放页和详情页的环境光跟随当前封面。";
+                                    title: "封面氛围背景";
+                                    description: "在播放页和详情页显示当前封面的模糊氛围背景。";
                                     checked: root.cover-accent;
                                     toggled(value) => { root.set-cover-accent(value); }
                                 }
@@ -1730,6 +1883,7 @@ export component AppWindow inherits Window {
                                 Text { text: "播放音质（下一首生效）"; color: #8e8e93; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
                                 HorizontalLayout {
                                     spacing: 8px;
+                                    PillButton { label: "自动"; primary: root.quality == "auto"; clicked => { root.set-quality("auto"); } }
                                     PillButton { label: "标准"; primary: root.quality == "standard"; clicked => { root.set-quality("standard"); } }
                                     PillButton { label: "较高"; primary: root.quality == "higher"; clicked => { root.set-quality("higher"); } }
                                     PillButton { label: "极高"; primary: root.quality == "exhigh"; clicked => { root.set-quality("exhigh"); } }
@@ -1768,7 +1922,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.3.5 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro 0.3.6 · Slint 原生版 · 数据便携"; color: #66666c; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
@@ -2090,9 +2244,10 @@ export component AppWindow inherits Window {
             y: root.height - 620px;
             width: 780px;
             height: 780px;
+            visible: !root.low-power;
             background: @radial-gradient(circle, #c9202722 0%, #c9202700 70%);
         }
-        TouchArea { }
+        TouchArea { enabled: root.player-open; }
 
         VerticalLayout {
             padding-top: 16px; padding-bottom: 18px; padding-left: 40px; padding-right: 40px;
@@ -2114,7 +2269,14 @@ export component AppWindow inherits Window {
                 Rectangle { width: 6px; height: 6px; border-radius: 3px; background: #ff645d; }
                 Text { text: "正在播放"; color: #ffffff94; font-size: 10px; font-weight: 650; letter-spacing: 1px; vertical-alignment: center; }
                 Text { text: "网易云音乐"; color: #ffffff4d; font-size: 10px; vertical-alignment: center; }
-                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.status-text;
+                    color: #ff9a94;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
                 Rectangle {
                     height: 22px;
                     width: 54px;
@@ -2282,49 +2444,28 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                Flickable {
-                    height: root.lyric-view-height;
-                    content-width: self.width;
-                    content-height: root.lyrics.length * root.lyric-line-height;
-                    content-y <=> root.lyric-scroll-y;
-                    flicked => { root.lyric-follow = false; }
-                    for line[index] in root.lyrics : Rectangle {
-                        y: index * root.lyric-line-height;
-                        width: parent.width;
-                        height: root.lyric-line-height;
-                        background: line-tap.has-hover ? #ffffff08 : transparent;
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 2px;
-                            Text {
-                                horizontal-stretch: 1;
-                                text: line.text;
-                                color: index == root.lyric-index ? #ffffff : #ffffff78;
-                                font-size: index == root.lyric-index ? 38px : 23px;
-                                font-weight: index == root.lyric-index ? 700 : 400;
-                                horizontal-alignment: center;
-                                overflow: elide;
-                                animate color { duration: 180ms; }
-                                animate font-size { duration: 180ms; }
-                            }
-                            if line.translation != "" && root.show-translation : Text {
-                                horizontal-stretch: 1;
-                                text: line.translation;
-                                color: index == root.lyric-index ? #ffffffa8 : #ffffff66;
-                                font-size: index == root.lyric-index ? 15px : 12px;
-                                horizontal-alignment: center;
-                                overflow: elide;
-                                animate color { duration: 180ms; }
-                                animate font-size { duration: 180ms; }
-                            }
+                LyricView {
+                    vertical-stretch: 1;
+                    lines: root.lyrics;
+                    current: root.lyric-index;
+                    line-height: root.lyric-line-height;
+                    verse-padding: root.lyric-padding;
+                    show-translation: root.show-translation;
+                    scroll-target <=> root.lyric-scroll-y;
+                    height-changed(value) => {
+                        root.lyric-view-height = value;
+                        if (root.lyric-follow) {
+                            root.lyric-scroll-y = root.lyric-target-y;
                         }
-                        line-tap := TouchArea {
-                            clicked => {
-                                root.lyric-follow = true;
-                                root.lyric-scroll-y = root.lyric-y-for(index);
-                                root.seek-lyric(line.time);
-                            }
-                        }
+                    }
+                    user-scrolled(value) => {
+                        root.lyric-follow = false;
+                        root.lyric-scroll-y = value;
+                    }
+                    line-clicked(index, time) => {
+                        root.lyric-follow = true;
+                        root.lyric-scroll-y = root.lyric-y-for(index);
+                        root.seek-lyric(time);
                     }
                 }
             }
@@ -2410,7 +2551,10 @@ export component AppWindow inherits Window {
                                 glyph-size: 24px;
                                 tint: #111111;
                             }
-                            play-tap := TouchArea { clicked => { root.toggle-play(); } }
+                            play-tap := TouchArea {
+                                enabled: root.player-open && root.controls-ready;
+                                clicked => { root.toggle-play(); }
+                            }
                         }
                         player-next := Rectangle {
                             init => {
@@ -2435,6 +2579,7 @@ export component AppWindow inherits Window {
                                 icon: @image-url("../assets/icons/next.svg");
                                 icon-size: 22px;
                                 button-size: 62px;
+                                enabled: root.player-open && root.controls-ready;
                                 clicked => { root.next(); }
                             }
                         }
@@ -2467,7 +2612,7 @@ export component AppWindow inherits Window {
             x: root.width - 372px;
             y: 70px;
             width: 332px;
-            height: root.height - root.titlebar-height - 160px;
+            height: parent.height - self.y - 160px;
             z: 60;
             border-radius: 22px;
             background: #17181aee;
@@ -2499,43 +2644,54 @@ export component AppWindow inherits Window {
                         clicked => { root.queue-open = false; }
                     }
                 }
-                ScrollView {
+                ListView {
                     vertical-stretch: 1;
-                    VerticalLayout {
-                        spacing: 4px;
-                        for track[index] in root.queue-tracks : Rectangle {
-                            height: 54px;
-                            border-radius: 12px;
-                            background: index == root.queue-index ? #c9202733 : (queue-row-tap.has-hover ? #ffffff0d : transparent);
-                            HorizontalLayout {
-                                padding: 7px;
-                                spacing: 10px;
-                                cross-axis-alignment: center;
-                                Rectangle {
-                                    width: 38px; height: 38px; border-radius: 9px;
-                                    background: track.tint;
-                                    clip: true;
-                                    Image { width: 100%; height: 100%; source: track.cover; image-fit: cover; }
-                                    if track.cover.width == 0 : Text {
-                                        x: 0; y: 0; width: 100%; height: 100%;
-                                        text: "♪"; color: #ffffff77; font-size: 15px;
-                                        horizontal-alignment: center; vertical-alignment: center;
-                                    }
+                    for track[index] in root.queue-tracks : Rectangle {
+                        width: parent.width;
+                        height: 54px;
+                        border-radius: 12px;
+                        background: index == root.queue-index ? #c9202733 : (queue-row-tap.has-hover ? #ffffff0d : transparent);
+                        HorizontalLayout {
+                            padding: 7px;
+                            spacing: 10px;
+                            cross-axis-alignment: center;
+                            Rectangle {
+                                width: 38px; height: 38px; border-radius: 9px;
+                                background: track.tint;
+                                clip: true;
+                                Image { width: 100%; height: 100%; source: track.cover; image-fit: cover; }
+                                if track.cover.width == 0 : Text {
+                                    x: 0; y: 0; width: 100%; height: 100%;
+                                    text: "♪"; color: #ffffff77; font-size: 15px;
+                                    horizontal-alignment: center; vertical-alignment: center;
                                 }
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    alignment: center;
-                                    Text { text: track.title; color: index == root.queue-index ? #ff8a84 : #f5f5f7; font-size: 12px; font-weight: 600; overflow: elide; }
-                                    Text { text: track.artist; color: #8e8e93; font-size: 10px; overflow: elide; }
-                                }
-                                Text { text: track.duration; color: #77777d; font-size: 9px; vertical-alignment: center; }
                             }
-                            queue-row-tap := TouchArea { clicked => { root.play-queue(index); } }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                alignment: center;
+                                Text { text: track.title; color: index == root.queue-index ? #ff8a84 : #f5f5f7; font-size: 12px; font-weight: 600; overflow: elide; }
+                                Text { text: track.artist; color: #8e8e93; font-size: 10px; overflow: elide; }
+                            }
+                            Text { text: track.duration; color: #77777d; font-size: 9px; vertical-alignment: center; }
                         }
+                        queue-row-tap := TouchArea { clicked => { root.play-queue(index); } }
                     }
                 }
             }
+        }
+        // During the open/close fade `player-open` may be false while the
+        // player is still visible. `opacity` does not affect hit testing, so
+        // block the fading player's invisible controls (and the workspace
+        // underneath) until the panel is actually removed.
+        if root.player-visible && !root.player-open : Rectangle {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+            z: 70;
+            background: transparent;
+            TouchArea { }
         }
     }
 

@@ -34,6 +34,8 @@ void ne_set_cookie_file(const char *path);
 const char *ne_cookie_file(void);
 /* (re)create the global jar from the cookie file; missing file = empty jar */
 void ne_jar_reload(void);
+/* Thread-safe exported Cookie header (malloc'd copy, caller frees). */
+char *ne_global_cookie_header(void);
 /* opaque global jar handle (for ne_jar_save_file on exit) */
 struct ne_jar;
 struct ne_jar *ne_global_jar(void);

@@ -25,7 +25,10 @@ fn main() {
     ];
 
     let mut build = cc::Build::new();
-    build.include("vendor/libnetease/include").define("_CRT_SECURE_NO_WARNINGS", None).files(sources);
+    build
+        .include("vendor/libnetease/include")
+        .define("_CRT_SECURE_NO_WARNINGS", None)
+        .files(sources);
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         build.flag_if_supported("/utf-8");
     } else {

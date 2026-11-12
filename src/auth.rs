@@ -46,7 +46,16 @@ fn load_cookies() -> Option<String> {
 fn save_cookies(cookies: &str) -> Result<(), String> {
     let path = auth_path()?;
     let encrypted = secure_store::protect(cookies.as_bytes())?;
-    fs::write(path, encrypted).map_err(|e| format!("写入登录凭证失败: {e}"))
+    let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&temporary, encrypted).map_err(|e| {
+        let _ = fs::remove_file(&temporary);
+        format!("写入登录凭证失败: {e}")
+    })?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("写入登录凭证失败: {error}"));
+    }
+    Ok(())
 }
 
 fn clear_cookies() -> Result<(), String> {
@@ -108,7 +117,16 @@ fn merge_set_cookies(headers: &reqwest::header::HeaderMap, jar: &mut BTreeMap<St
         };
         let name = name.trim();
         let val = val.trim();
-        if !name.is_empty() && !val.is_empty() {
+        if name.is_empty() {
+            continue;
+        }
+        let lower = raw.to_ascii_lowercase();
+        let expired = val.is_empty()
+            || lower.contains("max-age=0")
+            || lower.contains("expires=thu, 01 jan 1970");
+        if expired {
+            jar.remove(name);
+        } else {
             jar.insert(name.to_string(), val.to_string());
         }
     }
@@ -192,9 +210,11 @@ fn normalize_cookie_input(raw: &str) -> Result<String, String> {
         "WM_TID",
     ];
 
-    let trimmed = raw
-        .trim()
-        .trim_start_matches("Cookie:")
+    let trimmed = raw.trim();
+    let trimmed = trimmed
+        .strip_prefix("Cookie:")
+        .or_else(|| trimmed.strip_prefix("cookie:"))
+        .unwrap_or(trimmed)
         .trim()
         .replace(['\r', '\n'], ";");
     let mut seen = BTreeSet::new();
@@ -206,24 +226,35 @@ fn normalize_cookie_input(raw: &str) -> Result<String, String> {
         };
         let name = name.trim();
         let value = value.trim();
+        let Some(canonical) = ALLOWED
+            .iter()
+            .find(|allowed| allowed.eq_ignore_ascii_case(name))
+            .copied()
+        else {
+            continue;
+        };
         if name.is_empty()
             || value.is_empty()
-            || !ALLOWED.contains(&name)
             || value.chars().any(char::is_control)
-            || !seen.insert(name.to_string())
+            || !seen.insert(canonical.to_string())
         {
             continue;
         }
-        pairs.push(format!("{name}={value}"));
+        pairs.push(format!("{canonical}={value}"));
     }
 
     let normalized = pairs.join("; ");
-    if !normalized.split(';').any(|part| {
-        part.trim()
-            .strip_prefix("MUSIC_U=")
-            .is_some_and(|value| !value.trim().is_empty())
-    }) {
-        return Err("凭证中缺少 MUSIC_U，请从已登录的网页版复制 MUSIC_U 与 __csrf".to_string());
+    let has_auth_cookie = normalized.split(';').any(|part| {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            return false;
+        };
+        (name.eq_ignore_ascii_case("MUSIC_U") || name.eq_ignore_ascii_case("MUSIC_A"))
+            && !value.trim().is_empty()
+    });
+    if !has_auth_cookie {
+        return Err(
+            "凭证中缺少 MUSIC_U/MUSIC_A，请从已登录的网页版复制 MUSIC_U 与 __csrf".to_string(),
+        );
     }
     Ok(normalized)
 }
@@ -236,7 +267,7 @@ pub async fn qr_login_start(state: &AppState) -> Result<QrStart, String> {
     crate::logger::log(
         "debug",
         "auth",
-        &format!("qr start key_len={} url={}", unikey.len(), qr_url),
+        &format!("qr start key_len={} url_host=music.163.com", unikey.len()),
     );
     Ok(QrStart { unikey, qr_url })
 }
@@ -251,6 +282,25 @@ fn poll_message(code: i32, raw: &str) -> String {
         _ if !raw.is_empty() => raw.to_string(),
         _ => format!("登录状态异常（{code}），请刷新二维码重试"),
     }
+}
+
+fn has_auth_cookie(cookies: &str) -> bool {
+    cookies.split(';').any(|part| {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            return false;
+        };
+        (name.eq_ignore_ascii_case("MUSIC_U") || name.eq_ignore_ascii_case("MUSIC_A"))
+            && !value.trim().is_empty()
+    })
+}
+
+fn has_csrf_cookie(cookies: &str) -> bool {
+    cookies.split(';').any(|part| {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case("__csrf") && !value.trim().is_empty()
+    })
 }
 
 pub async fn qr_login_poll(state: &AppState, key: String) -> Result<QrPoll, String> {
@@ -270,21 +320,36 @@ pub async fn qr_login_poll(state: &AppState, key: String) -> Result<QrPoll, Stri
 
     if code == 803 {
         let epoch = state.session_epoch();
-        let cookies = crate::libnetease::cookie_header();
-        if cookies.is_empty() {
-            return Err("扫码成功，但未能读取登录凭证；请重试".to_string());
+        // The QR success response sometimes carries the cookie jar in its
+        // body instead of Set-Cookie headers. Merge that fallback first.
+        if let Some(body_cookie) = json
+            .get("cookie")
+            .or_else(|| json.pointer("/data/cookie"))
+            .and_then(Value::as_str)
+        {
+            if !body_cookie.trim().is_empty() {
+                crate::libnetease::merge_cookies(body_cookie);
+            }
         }
-        let cookies = if crate::state::cookie_value(&cookies, "__csrf").is_some() {
-            cookies
-        } else {
-            let refreshed = refresh_session_cookies(&state, &cookies).await;
-            crate::libnetease::set_cookies(&refreshed);
-            refreshed
+        let mut cookies = crate::libnetease::cookie_header();
+        if !has_auth_cookie(&cookies) {
+            return Err("扫码成功，但未获取到 MUSIC_U/MUSIC_A 登录凭证，请重试".to_string());
+        }
+        if !has_csrf_cookie(&cookies) {
+            cookies = refresh_session_cookies(&state, &cookies).await;
+            crate::libnetease::set_cookies(&cookies);
+            if !has_csrf_cookie(&cookies) {
+                return Err("登录成功，但未获取到 __csrf，请重试".to_string());
+            }
+        }
+        let account = fetch_account_with_retry(&state, &cookies)
+            .await
+            .or_else(|| account_from_json(&json));
+        let Some(account) = account else {
+            // Do not save a half-valid session or leave the main loop
+            // polling forever when the profile endpoint failed.
+            return Err("扫码成功，但读取账号资料失败，请重试".to_string());
         };
-        let mut account = fetch_account_with_retry(&state, &cookies).await;
-        if account.is_none() {
-            account = account_from_json(&json);
-        }
         if state.session_epoch() != epoch {
             return Ok(QrPoll {
                 code,
@@ -293,16 +358,11 @@ pub async fn qr_login_poll(state: &AppState, key: String) -> Result<QrPoll, Stri
             });
         }
         let _ = save_cookies(&cookies);
-        state.set_session(Some(cookies), account.clone());
-        let message = if account.is_some() {
-            "登录成功，正在同步你的音乐库".to_string()
-        } else {
-            "登录成功，但账号资料同步较慢；请稍候或重启应用".to_string()
-        };
+        state.set_session(Some(cookies), Some(account.clone()));
         return Ok(QrPoll {
             code,
-            message,
-            account,
+            message: "登录成功，正在同步你的音乐库".to_string(),
+            account: Some(account),
         });
     }
 
@@ -317,11 +377,14 @@ pub async fn import_cookie(state: &AppState, cookie: String) -> Result<Account, 
     let _guard = state.qr_poll_lock.lock().await;
     let epoch = state.session_epoch();
     let cookies = normalize_cookie_input(&cookie)?;
-    let cookies = if crate::state::cookie_value(&cookies, "__csrf").is_some() {
+    let cookies = if has_csrf_cookie(&cookies) {
         cookies
     } else {
         refresh_session_cookies(&state, &cookies).await
     };
+    if !has_auth_cookie(&cookies) || !has_csrf_cookie(&cookies) {
+        return Err("凭证已失效，或不是有效的网易云网页版 Cookie".to_string());
+    }
     let account = fetch_account_with_retry(&state, &cookies)
         .await
         .ok_or_else(|| "凭证已失效，或不是有效的网易云网页版 Cookie".to_string())?;
@@ -352,7 +415,27 @@ pub async fn auth_status(state: &AppState) -> Result<Option<Account>, String> {
         return Ok(None);
     };
     let epoch = state.session_epoch();
-    let Some(account) = fetch_account(&state, &cookies).await? else {
+    let mut account = None;
+    let mut last_error = None;
+    for attempt in 0..2 {
+        match fetch_account(&state, &cookies).await {
+            Ok(Some(value)) => {
+                account = Some(value);
+                break;
+            }
+            Ok(None) => break,
+            Err(error) => {
+                last_error = Some(error);
+                if attempt == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                }
+            }
+        }
+    }
+    let Some(account) = account else {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
         return Ok(None);
     };
     if state.session_epoch() != epoch {
@@ -365,14 +448,13 @@ pub async fn auth_status(state: &AppState) -> Result<Option<Account>, String> {
 }
 
 pub async fn logout(state: &AppState) -> Result<(), String> {
-    clear_cookies()?;
+    // Clear the in-memory session first so a failed file deletion can never
+    // leave the app half-logged-in.
+    let file_result = clear_cookies();
     crate::libnetease::clear_cookies();
-    if let Ok(mut jars) = state.qr_jars.lock() {
-        jars.clear();
-    }
     state.set_session(None, None);
     crate::logger::log("info", "auth", "logout completed");
-    Ok(())
+    file_result
 }
 
 #[cfg(test)]

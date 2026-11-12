@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,16 +15,9 @@ pub struct Account {
     pub avatar_url: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct ProxyInfo {
-    pub base: String,
-    pub token: String,
-}
-
-/// Shared state for every Tauri command and the local audio proxy.
+/// Shared state for the application and the NetEase request layer.
 ///
-/// The type is cheap to clone: all mutable state sits behind `Arc<Mutex<_>>`,
-/// which lets the axum server keep its own handle without knowing about Tauri.
+/// The type is cheap to clone: all mutable state sits behind `Arc<Mutex<_>>`.
 pub fn is_allowed_audio_host(host: &str) -> bool {
     host.ends_with(".music.126.net")
         || host.ends_with(".126.net")
@@ -36,17 +29,15 @@ pub fn is_allowed_audio_host(host: &str) -> bool {
 pub struct AppState {
     pub cookies: Arc<Mutex<Option<String>>>,
     pub account: Arc<Mutex<Option<Account>>>,
-    pub qr_jars: Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
-    pub url_cache: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    pub url_cache: Arc<Mutex<HashMap<String, (String, String, bool, Instant)>>>,
     pub session_epoch: Arc<Mutex<u64>>,
     pub qr_poll_lock: Arc<tokio::sync::Mutex<()>>,
     pub api: reqwest::Client,
     pub stream: reqwest::Client,
-    pub proxy: ProxyInfo,
 }
 
 impl AppState {
-    pub fn new(proxy: ProxyInfo) -> Self {
+    pub fn new() -> Self {
         let api = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(8))
@@ -72,13 +63,11 @@ impl AppState {
         Self {
             cookies: Arc::new(Mutex::new(None)),
             account: Arc::new(Mutex::new(None)),
-            qr_jars: Arc::new(Mutex::new(BTreeMap::new())),
             url_cache: Arc::new(Mutex::new(HashMap::new())),
             session_epoch: Arc::new(Mutex::new(0)),
             qr_poll_lock: Arc::new(tokio::sync::Mutex::new(())),
             api,
             stream,
-            proxy,
         }
     }
 
@@ -112,11 +101,4 @@ impl AppState {
             cache.clear();
         }
     }
-}
-
-pub fn cookie_value(cookies: &str, name: &str) -> Option<String> {
-    cookies.split(';').find_map(|part| {
-        let (key, value) = part.trim().split_once('=')?;
-        (key == name).then(|| value.trim().to_string())
-    })
 }

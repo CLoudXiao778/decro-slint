@@ -7,14 +7,12 @@ mod media;
 mod memory;
 mod netease;
 mod paths;
-mod proxy;
 mod secure_store;
 mod state;
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -27,7 +25,7 @@ use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode,
     VecModel, Weak,
 };
-use state::{AppState, ProxyInfo};
+use state::AppState;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -43,6 +41,7 @@ struct Catalog {
     library_playlists: Vec<netease::PlaylistDto>,
     search_songs: Vec<netease::TrackDto>,
     search_playlists: Vec<netease::PlaylistDto>,
+    search_lyric_tracks: Vec<netease::TrackDto>,
     detail: Vec<netease::TrackDto>,
 }
 
@@ -57,10 +56,16 @@ struct Player {
 #[derive(Default, Clone)]
 struct AudioSnapshot {
     position: f32,
+    /// Duration reported by the decoder (0 = unknown). The UI keeps using the
+    /// metadata duration until this becomes available.
+    duration: f32,
     playing: bool,
     loaded: bool,
     ended: bool,
     error: Option<String>,
+    /// Generation of the `start_track` request this snapshot belongs to.
+    /// `0` means no track is loaded / stopped.
+    token: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -72,11 +77,21 @@ struct SavedPlayer {
 }
 
 enum AudioCmd {
-    Load(Vec<u8>, f32, f32),
+    Load {
+        path: PathBuf,
+        resume_at: f32,
+        token: u64,
+        autoplay: bool,
+    },
     PlayPause,
     Volume(f32),
-    Seek(f32),
-    Stop,
+    Seek {
+        value: f32,
+        token: u64,
+    },
+    Stop {
+        token: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -85,43 +100,96 @@ struct AudioHandle {
     snapshot: Arc<Mutex<AudioSnapshot>>,
 }
 
+/// A decoder always reports at least a few seconds; cap the download so a
+/// broken CDN response cannot fill the disk.
+const MAX_AUDIO_BYTES: u64 = 256 * 1024 * 1024;
+const AUDIO_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
 fn spawn_audio() -> AudioHandle {
     let (tx, rx) = mpsc::channel::<AudioCmd>();
     let snapshot = Arc::new(Mutex::new(AudioSnapshot::default()));
     let snap = snapshot.clone();
     std::thread::spawn(move || {
-        let Ok((_stream, handle)) = rodio::OutputStream::try_default() else {
+        let fail = |message: &str| {
             if let Ok(mut state) = snap.lock() {
-                state.error = Some("无法打开系统音频输出".to_string());
+                state.error = Some(message.to_string());
+                // A permanent output failure is not tied to a track request;
+                // use the sentinel token so the UI still surfaces it.
+                state.token = u64::MAX;
+                state.loaded = false;
+                state.playing = false;
             }
+        };
+        let Ok((_stream, handle)) = rodio::OutputStream::try_default() else {
+            fail("无法打开系统音频输出");
             return;
         };
         let Ok(sink) = rodio::Sink::try_new(&handle) else {
-            if let Ok(mut state) = snap.lock() {
-                state.error = Some("无法初始化音频播放器".to_string());
-            }
+            fail("无法初始化音频播放器");
             return;
         };
         sink.set_volume(0.7);
         let mut loaded = false;
+        let mut current_token: u64 = 0;
+        let mut last_token: u64 = 0;
+        let mut decoded_duration: Option<f32> = None;
+        let mut current_path: Option<PathBuf> = None;
+        let mut pending_seek: Option<(u64, f32)> = None;
         loop {
             match rx.recv_timeout(Duration::from_millis(120)) {
-                Ok(AudioCmd::Load(bytes, _duration, resume_at)) => {
+                Ok(AudioCmd::Load {
+                    path,
+                    mut resume_at,
+                    token,
+                    autoplay,
+                }) => {
+                    if token < last_token {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    last_token = token;
                     sink.stop();
                     loaded = false;
-                    match rodio::Decoder::new(Cursor::new(bytes)) {
+                    decoded_duration = None;
+                    if let Some(old) = current_path.take() {
+                        let _ = fs::remove_file(old);
+                    }
+                    if let Some((pending_token, value)) = pending_seek.take() {
+                        if pending_token == token {
+                            resume_at = value;
+                        }
+                    }
+                    let file = match std::fs::File::open(&path) {
+                        Ok(file) => file,
+                        Err(error) => {
+                            if let Ok(mut state) = snap.lock() {
+                                state.position = 0.0;
+                                state.duration = 0.0;
+                                state.loaded = false;
+                                state.playing = false;
+                                state.ended = false;
+                                state.error = Some(format!("音频文件打开失败: {error}"));
+                                state.token = token;
+                            }
+                            let _ = fs::remove_file(&path);
+                            current_token = token;
+                            continue;
+                        }
+                    };
+                    match rodio::Decoder::new(std::io::BufReader::new(file)) {
                         Ok(decoder) => {
                             // The metadata duration can describe the full song even
                             // when the CDN returns a 30 s VIP/copyright preview.
                             // Seeking past the decoded stream makes the sink end at
                             // once, and the auto-next timer then starts a different
                             // song. Clamp against the real decoded duration.
-                            let decoded_duration = rodio::Source::total_duration(&decoder)
+                            let real_duration = rodio::Source::total_duration(&decoder)
                                 .map(|value| value.as_secs_f32());
                             // With an unknown decoded length, do not seek: the
                             // stream may be a short preview and would auto-next.
-                            let safe_end = decoded_duration.unwrap_or(0.0);
-                            let resume_from = if resume_at > 0.5 && resume_at + 3.0 < safe_end {
+                            let resume_from = if resume_at > 0.5
+                                && real_duration.is_some_and(|duration| resume_at + 3.0 < duration)
+                            {
                                 resume_at
                             } else {
                                 0.0
@@ -131,49 +199,102 @@ fn spawn_audio() -> AudioHandle {
                                     "info",
                                     "audio",
                                     &format!(
-                                        "resume clamped requested={resume_at:.1}s decoded={safe_end:.1}s"
+                                        "resume clamped requested={resume_at:.1}s decoded={:.1}s",
+                                        real_duration.unwrap_or(0.0)
                                     ),
                                 );
                             }
                             sink.append(decoder);
-                            sink.play();
+                            if autoplay {
+                                sink.play();
+                            } else {
+                                sink.pause();
+                            }
                             let resumed = resume_from > 0.5
                                 && sink.try_seek(Duration::from_secs_f32(resume_from)).is_ok();
                             loaded = true;
+                            current_token = token;
+                            decoded_duration = real_duration;
+                            current_path = Some(path);
                             if let Ok(mut state) = snap.lock() {
                                 state.position = if resumed { resume_from } else { 0.0 };
+                                state.duration = real_duration.unwrap_or(0.0);
                                 state.loaded = true;
+                                state.playing = autoplay;
                                 state.ended = false;
                                 state.error = None;
+                                state.token = token;
                             }
                         }
                         Err(error) => {
                             if let Ok(mut state) = snap.lock() {
+                                state.position = 0.0;
+                                state.duration = 0.0;
                                 state.error = Some(format!("音频解码失败: {error}"));
                                 state.ended = false;
                                 state.playing = false;
                                 state.loaded = false;
+                                state.token = token;
                             }
+                            current_token = token;
+                            let _ = fs::remove_file(&path);
                         }
                     }
                 }
                 Ok(AudioCmd::PlayPause) => {
-                    if sink.is_paused() {
-                        sink.play();
-                    } else {
-                        sink.pause();
+                    if loaded {
+                        if sink.is_paused() {
+                            sink.play();
+                        } else {
+                            sink.pause();
+                        }
                     }
                 }
                 Ok(AudioCmd::Volume(value)) => sink.set_volume(value),
-                Ok(AudioCmd::Seek(value)) => {
-                    let _ = sink.try_seek(Duration::from_secs_f32(value.max(0.0)));
+                Ok(AudioCmd::Seek { value, token }) => {
+                    if token == current_token && loaded {
+                        let ceiling = decoded_duration
+                            .map(|duration| (duration - 0.25).max(0.0))
+                            .unwrap_or(f32::MAX);
+                        let target = value.clamp(0.0, ceiling);
+                        let _ = sink.try_seek(Duration::from_secs_f32(target));
+                        pending_seek = None;
+                    } else if token >= last_token {
+                        // The new track is still being resolved/downloaded;
+                        // apply the seek as soon as its Load arrives.
+                        pending_seek = Some((token, value));
+                    }
                 }
-                Ok(AudioCmd::Stop) => {
+                Ok(AudioCmd::Stop { token }) => {
+                    if token < last_token {
+                        continue;
+                    }
+                    last_token = token;
                     sink.stop();
                     loaded = false;
+                    current_token = 0;
+                    decoded_duration = None;
+                    pending_seek = None;
+                    if let Some(path) = current_path.take() {
+                        let _ = fs::remove_file(path);
+                    }
+                    if let Ok(mut state) = snap.lock() {
+                        state.position = 0.0;
+                        state.duration = 0.0;
+                        state.playing = false;
+                        state.loaded = false;
+                        state.ended = false;
+                        state.error = None;
+                        state.token = 0;
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Some(path) = current_path.take() {
+                        let _ = fs::remove_file(path);
+                    }
+                    break;
+                }
             }
             let position = sink.get_pos().as_secs_f32();
             let playing = loaded && !sink.empty() && !sink.is_paused();
@@ -185,6 +306,8 @@ fn spawn_audio() -> AudioHandle {
                 state.position = position;
                 state.playing = playing;
                 state.loaded = loaded;
+                state.duration = decoded_duration.unwrap_or(0.0);
+                state.token = current_token;
                 if ended {
                     state.ended = true;
                 }
@@ -375,6 +498,13 @@ async fn load_playlist_covers(
         let Ok(Some((index, playlist_id, path))) = joined else {
             continue;
         };
+        let image = tokio::task::spawn_blocking(move || cover_buffer(&path))
+            .await
+            .ok()
+            .flatten();
+        let Some(image) = image else {
+            continue;
+        };
         update_ui(&ui, move |ui| {
             let model = playlist_model_for(ui, target);
             let Some(mut item) = model.row_data(index) else {
@@ -383,10 +513,8 @@ async fn load_playlist_covers(
             if item.id.as_str() != playlist_id.as_str() {
                 return;
             }
-            if let Ok(image) = Image::load_from_path(&path) {
-                item.cover = image;
-                model.set_row_data(index, item);
-            }
+            item.cover = Image::from_rgba8(image);
+            model.set_row_data(index, item);
         });
     }
 }
@@ -423,6 +551,13 @@ async fn load_cover_refs(
         let Ok(Some((index, id, path))) = joined else {
             continue;
         };
+        let image = tokio::task::spawn_blocking(move || cover_buffer(&path))
+            .await
+            .ok()
+            .flatten();
+        let Some(image) = image else {
+            continue;
+        };
         update_ui(&ui, move |ui| {
             let model = playlist_model_for(ui, target);
             let Some(mut item) = model.row_data(index) else {
@@ -431,10 +566,8 @@ async fn load_cover_refs(
             if item.id.as_str() != id.as_str() {
                 return;
             }
-            if let Ok(image) = Image::load_from_path(&path) {
-                item.cover = image;
-                model.set_row_data(index, item);
-            }
+            item.cover = Image::from_rgba8(image);
+            model.set_row_data(index, item);
         });
     }
 }
@@ -442,6 +575,16 @@ async fn load_cover_refs(
 /// Must run on the UI thread: it decodes cached covers into Slint images.
 fn track_items_for_ui(items: &[netease::TrackDto]) -> Vec<TrackItem> {
     items.iter().map(|track| track_item(track, None)).collect()
+}
+
+fn lyric_result_items_for_ui(items: &[netease::LyricSearchDto]) -> Vec<LyricResultItem> {
+    items
+        .iter()
+        .map(|item| LyricResultItem {
+            track: track_item(&item.track, None),
+            lines: item.lines.join(" / ").into(),
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -510,6 +653,13 @@ async fn load_track_covers(
         let Ok(Some((index, track_id, path))) = joined else {
             continue;
         };
+        let image = tokio::task::spawn_blocking(move || cover_buffer(&path))
+            .await
+            .ok()
+            .flatten();
+        let Some(image) = image else {
+            continue;
+        };
         update_ui(&ui, move |ui| {
             let model = track_model_for(ui, target);
             let Some(mut item) = model.row_data(index) else {
@@ -518,10 +668,8 @@ async fn load_track_covers(
             if item.id.as_str() != track_id.as_str() {
                 return;
             }
-            if let Ok(image) = Image::load_from_path(&path) {
-                item.cover = image;
-                model.set_row_data(index, item);
-            }
+            item.cover = Image::from_rgba8(image);
+            model.set_row_data(index, item);
         });
     }
 }
@@ -535,7 +683,7 @@ fn update_ui<F: FnOnce(&AppWindow) + Send + 'static>(ui: &Weak<AppWindow>, f: F)
     });
 }
 
-fn blurred_backdrop(path: &std::path::Path) -> Option<Image> {
+fn blurred_backdrop_buffer(path: &std::path::Path) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     let source = image::open(path).ok()?;
     // Generate the blur at a size that still looks smooth when stretched to
     // the window. A 24/180px source is what made the old backdrop look blocky.
@@ -545,13 +693,62 @@ fn blurred_backdrop(path: &std::path::Path) -> Option<Image> {
     let (width, height) = rgba.dimensions();
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
     buffer.make_mut_bytes().copy_from_slice(rgba.as_raw());
-    Some(Image::from_rgba8(buffer))
+    Some(buffer)
+}
+
+fn cover_buffer(path: &std::path::Path) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    let rgba = image::open(path).ok()?.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    buffer.make_mut_bytes().copy_from_slice(rgba.as_raw());
+    Some(buffer)
 }
 
 static STATUS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WINDOW_RESTORED: AtomicBool = AtomicBool::new(false);
 static WINDOW_MINIMIZED: AtomicBool = AtomicBool::new(false);
 static WINDOW_BACKGROUNDED: AtomicBool = AtomicBool::new(false);
+/// Last value sent to SMTC. Kept in one place so a direct update from
+/// `start_track`/errors and the 400 ms UI timer cannot diverge.
+static MEDIA_PLAYING: AtomicBool = AtomicBool::new(false);
+
+fn set_media_playing(playing: bool) {
+    if MEDIA_PLAYING.swap(playing, Ordering::Relaxed) != playing {
+        media::update_playback(playing);
+    }
+}
+
+static SHUTDOWN_SAVED: AtomicBool = AtomicBool::new(false);
+
+fn current_position(
+    audio: &AudioHandle,
+    player: &Arc<Mutex<Player>>,
+    generation: &Arc<AtomicU64>,
+) -> f32 {
+    let token = generation.load(Ordering::Relaxed);
+    if let Ok(snapshot) = audio.snapshot.lock() {
+        if snapshot.token == token && snapshot.loaded && snapshot.position.is_finite() {
+            return snapshot.position.max(0.0);
+        }
+    }
+    player
+        .lock()
+        .ok()
+        .map(|player| {
+            if player.resume_position.is_finite() {
+                player.resume_position.max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0)
+}
+
+fn save_before_exit(player: &Arc<Mutex<Player>>, audio: &AudioHandle, generation: &Arc<AtomicU64>) {
+    let position = current_position(audio, player, generation);
+    save_player(player, position);
+    SHUTDOWN_SAVED.store(true, Ordering::Relaxed);
+}
 
 #[cfg(windows)]
 fn watch_window_restore() {
@@ -594,23 +791,32 @@ fn watch_window_restore() {}
 fn schedule_forced_exit() {
     // Safety net for the portable exe: if the event loop or the audio/player
     // snapshot ever prevents the normal shutdown path, do not leave a hidden
-    // process locking the folder.
+    // process locking the folder. Give the synchronous close-path save ample
+    // time; only force-exit if it did not complete.
     let _ = std::thread::Builder::new()
         .name("decro-exit".into())
         .spawn(|| {
-            std::thread::sleep(Duration::from_millis(2000));
+            for _ in 0..50 {
+                if SHUTDOWN_SAVED.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
             std::process::exit(0);
         });
 }
 
 fn set_status_temp(ui: &AppWindow, message: String, duration: Duration) {
-    ui.set_status_text(message.into());
+    ui.set_status_text(message.clone().into());
     let request = STATUS_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let handle = ui.as_weak();
+    let expected = message;
     slint::Timer::single_shot(duration, move || {
         if STATUS_GENERATION.load(Ordering::Relaxed) == request {
             if let Some(ui) = handle.upgrade() {
-                ui.set_status_text("".into());
+                if ui.get_status_text().as_str() == expected.as_str() {
+                    ui.set_status_text("".into());
+                }
             }
         }
     });
@@ -680,6 +886,7 @@ impl Default for Prefs {
 
 fn normalize_quality(value: &str) -> &'static str {
     match value {
+        "auto" => "auto",
         "standard" => "standard",
         "higher" => "higher",
         "exhigh" => "exhigh",
@@ -689,8 +896,26 @@ fn normalize_quality(value: &str) -> &'static str {
     }
 }
 
+/// Map a track's advertised tier to the best request level for the "auto"
+/// setting. The caller still falls back to exhigh/standard on failure.
+fn auto_quality(quality: &str) -> &'static str {
+    let quality = quality.to_ascii_lowercase();
+    if quality.contains("hi-res") || quality.contains("hi res") || quality.contains("hr") {
+        "hires"
+    } else if quality.contains("sq") || quality.contains("无损") {
+        "lossless"
+    } else if quality.contains("hq") || quality.contains("极高") {
+        "exhigh"
+    } else if quality.contains("较高") || quality.contains("higher") {
+        "higher"
+    } else {
+        "standard"
+    }
+}
+
 fn quality_label(value: &str) -> &'static str {
     match value {
+        "auto" => "自动",
         "standard" => "标准",
         "higher" => "较高",
         "exhigh" => "极高",
@@ -733,6 +958,23 @@ fn load_prefs() -> Prefs {
     }
 }
 
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let _ = fs::create_dir_all(parent);
+    let temporary = path.with_extension(format!("tmp.{}", rand::random::<u64>()));
+    if fs::write(&temporary, bytes).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return false;
+    }
+    if fs::rename(&temporary, path).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return false;
+    }
+    true
+}
+
 fn save_prefs(prefs: &Prefs) {
     let path = paths::data_dir().join("settings.json");
     let payload = serde_json::json!({
@@ -742,7 +984,7 @@ fn save_prefs(prefs: &Prefs) {
         "showTranslation": prefs.show_translation,
         "coverAccent": prefs.cover_accent,
     });
-    let _ = fs::write(path, payload.to_string());
+    let _ = write_atomic(&path, payload.to_string().as_bytes());
 }
 
 fn cover_url(url: &str, size: u32) -> String {
@@ -808,9 +1050,25 @@ async fn fetch_cover(state: &AppState, url: String) -> Option<PathBuf> {
 
 static LOCAL_RECENT: OnceLock<Arc<Mutex<Vec<netease::TrackDto>>>> = OnceLock::new();
 static LIKED_IDS: OnceLock<Arc<Mutex<std::collections::HashSet<String>>>> = OnceLock::new();
+static CURRENT_ART: OnceLock<Arc<Mutex<Option<(String, PathBuf)>>>> = OnceLock::new();
+static LIKE_INFLIGHT: OnceLock<Arc<Mutex<std::collections::HashSet<String>>>> = OnceLock::new();
+static SUBSCRIBE_INFLIGHT: OnceLock<Arc<Mutex<std::collections::HashSet<String>>>> =
+    OnceLock::new();
 
 fn liked_ids() -> &'static Arc<Mutex<std::collections::HashSet<String>>> {
     LIKED_IDS.get_or_init(|| Arc::new(Mutex::new(std::collections::HashSet::new())))
+}
+
+fn current_art() -> &'static Arc<Mutex<Option<(String, PathBuf)>>> {
+    CURRENT_ART.get_or_init(|| Arc::new(Mutex::new(None)))
+}
+
+fn like_inflight() -> &'static Arc<Mutex<std::collections::HashSet<String>>> {
+    LIKE_INFLIGHT.get_or_init(|| Arc::new(Mutex::new(std::collections::HashSet::new())))
+}
+
+fn subscribe_inflight() -> &'static Arc<Mutex<std::collections::HashSet<String>>> {
+    SUBSCRIBE_INFLIGHT.get_or_init(|| Arc::new(Mutex::new(std::collections::HashSet::new())))
 }
 
 fn load_local_recent() -> Vec<netease::TrackDto> {
@@ -826,7 +1084,10 @@ fn local_recent() -> &'static Arc<Mutex<Vec<netease::TrackDto>>> {
 
 fn persist_local_recent(list: &[netease::TrackDto]) {
     if let Ok(text) = serde_json::to_string(list) {
-        let _ = fs::write(paths::data_dir().join("recent-played.json"), text);
+        let _ = write_atomic(
+            &paths::data_dir().join("recent-played.json"),
+            text.as_bytes(),
+        );
     }
 }
 
@@ -842,16 +1103,6 @@ fn remember_local_recent(track: &netease::TrackDto) -> bool {
     list.truncate(200);
     persist_local_recent(&list);
     true
-}
-
-fn replace_local_recent(tracks: Vec<netease::TrackDto>) -> Vec<netease::TrackDto> {
-    let mut list = tracks;
-    list.truncate(200);
-    if let Ok(mut current) = local_recent().lock() {
-        *current = list.clone();
-    }
-    persist_local_recent(&list);
-    list
 }
 
 fn merge_recent(
@@ -895,8 +1146,13 @@ fn save_player(player: &Arc<Mutex<Player>>, position: f32) {
                 return;
             }
             let index = player.index.min(player.queue.len() - 1);
-            let start = index.saturating_sub(50);
-            let end = (index + 150).min(player.queue.len());
+            // Keep a generous context window (Tauri keeps up to 500). Near
+            // the queue end the window is shifted so `prev` can still reach
+            // earlier tracks instead of collapsing to ~50 entries.
+            let start = index
+                .saturating_sub(250)
+                .min(player.queue.len().saturating_sub(500));
+            let end = (start + 500).min(player.queue.len());
             (
                 player.queue[start..end].to_vec(),
                 index - start,
@@ -914,7 +1170,10 @@ fn save_player(player: &Arc<Mutex<Player>>, position: f32) {
         index,
         position,
     }) {
-        let _ = fs::write(paths::data_dir().join("last-playback.json"), text);
+        let _ = write_atomic(
+            &paths::data_dir().join("last-playback.json"),
+            text.as_bytes(),
+        );
     }
 }
 
@@ -954,6 +1213,105 @@ fn find_track(catalog: &Catalog, id: &str) -> Option<(netease::TrackDto, Vec<net
     None
 }
 
+/// Resolve a click to the list it actually came from, rather than guessing by
+/// priority. Without this a song that also exists in a previously opened
+/// detail page would hijack the queue and make `next`/`prev` useless.
+fn find_track_in_context(
+    catalog: &Catalog,
+    context: &str,
+    id: &str,
+) -> Option<(netease::TrackDto, Vec<netease::TrackDto>)> {
+    let list = match context {
+        "new" => &catalog.new_songs,
+        "daily" => &catalog.daily,
+        "library-recent" => &catalog.library_recent,
+        "search" => &catalog.search_songs,
+        "search-lyric" => &catalog.search_lyric_tracks,
+        "recent" => &catalog.recent,
+        _ => return None,
+    };
+    list.iter()
+        .find(|track| track.id == id)
+        .map(|track| (track.clone(), list.clone()))
+}
+
+fn report_play_error(
+    ui: &Weak<AppWindow>,
+    generation: &Arc<AtomicU64>,
+    request: u64,
+    message: String,
+) {
+    if generation.load(Ordering::Relaxed) != request {
+        return;
+    }
+    update_ui(ui, move |ui| {
+        ui.set_status_text(message.into());
+        ui.set_loading(false);
+        ui.set_playing(false);
+    });
+    set_media_playing(false);
+}
+
+/// Download the (fully resolved) audio URL to the per-play cache file. Using a
+/// file instead of `Response::bytes()` keeps memory bounded for Hi-Res tracks
+/// and lets rodio seek without holding the whole song in RAM.
+async fn download_audio(
+    state: &AppState,
+    url: &str,
+    path: std::path::PathBuf,
+) -> Result<std::path::PathBuf, String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut response = state
+        .stream
+        .get(url)
+        .header(reqwest::header::REFERER, "https://music.163.com/")
+        .header(reqwest::header::ACCEPT, "*/*")
+        .send()
+        .await
+        .map_err(|error| format!("下载音源失败: {error}"))?;
+    if !response
+        .url()
+        .host_str()
+        .is_some_and(state::is_allowed_audio_host)
+    {
+        return Err("音源域名异常".to_string());
+    }
+    if !response.status().is_success() {
+        return Err(format!("音源返回 HTTP {}", response.status()));
+    }
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|error| format!("创建音频缓存失败: {error}"))?;
+    let mut total: u64 = 0;
+    let result: Result<(), String> = async {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| format!("读取音源失败: {error}"))?
+        {
+            total += chunk.len() as u64;
+            if total > MAX_AUDIO_BYTES {
+                return Err("音源文件过大，已停止下载".to_string());
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| format!("写入音频缓存失败: {error}"))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| format!("写入音频缓存失败: {error}"))?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(error);
+    }
+    Ok(path)
+}
+
 fn start_track(
     runtime: &Arc<tokio::runtime::Runtime>,
     state: Arc<AppState>,
@@ -964,8 +1322,18 @@ fn start_track(
     generation: Arc<AtomicU64>,
     prefs: Arc<Mutex<Prefs>>,
     track: netease::TrackDto,
+    autoplay: bool,
 ) {
     let request = generation.fetch_add(1, Ordering::Relaxed) + 1;
+    // Invalidate any in-flight load and stop the previous sink immediately.
+    // The old request's Load (if it reaches the audio thread later) is rejected
+    // by the token check, so a failed new track can never leave the previous
+    // song playing under the new title.
+    let _ = audio.tx.send(AudioCmd::Stop { token: request });
+    set_media_playing(false);
+    if let Ok(mut slot) = current_art().lock() {
+        *slot = None;
+    }
     let duration = track.duration_ms as f32 / 1000.0;
     let (resume_at, queue_tracks, queue_index) = {
         let mut player = match _player.lock() {
@@ -979,9 +1347,9 @@ fn start_track(
         let position = if same_track {
             player.resume_position
         } else {
+            player.resume_position = 0.0;
             0.0
         };
-        player.resume_position = 0.0;
         let resume_at = if position > 0.5 && position + 3.0 < duration {
             position
         } else {
@@ -998,7 +1366,6 @@ fn start_track(
         ),
     );
     media::update_track(&track.name, &track.artist, &track.album, None);
-    media::update_playback(true);
     if remember_local_recent(&track) {
         let local = local_recent()
             .lock()
@@ -1021,27 +1388,34 @@ fn start_track(
             ));
         }
     }
-    if let Ok(mut snapshot) = audio.snapshot.lock() {
-        snapshot.loaded = false;
-        snapshot.playing = false;
-        snapshot.ended = false;
-    }
     let title = track.name.clone();
     let artist = track.artist.clone();
     let album = track.album.clone();
-    let requested_quality = prefs
-        .lock()
-        .ok()
-        .map(|prefs| prefs.quality.clone())
-        .unwrap_or_else(|| "exhigh".to_string());
-    let quality_text = if track.quality.is_empty() {
+    let media_title = title.clone();
+    let media_artist = artist.clone();
+    let media_album = album.clone();
+    let prefs_snapshot = prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
+    let selected_quality = prefs_snapshot.quality.clone();
+    let requested_quality = if selected_quality == "auto" {
+        auto_quality(&track.quality).to_string()
+    } else {
+        selected_quality.clone()
+    };
+    let track_quality = track.quality.clone();
+    let quality_text = if selected_quality == "auto" {
+        "自动".to_string()
+    } else if track.quality.is_empty() {
         quality_label(&requested_quality).to_string()
     } else {
         format!("{} · {}", quality_label(&requested_quality), track.quality)
     };
     let cover = color_for(&track.id);
-    let low_power = prefs.lock().map(|prefs| prefs.low_power).unwrap_or(false);
     let track_id = track.id.clone();
+    let lyric_track_id = track.id.clone();
+    let cover_track_id = track.id.clone();
+    let audio_track_id = track.id.clone();
+    let audio_album_id = track.album_id.clone();
+    let cover_endpoint = cover_url(&track.cover_url, 500);
     let liked = liked_ids()
         .lock()
         .map(|set| set.contains(&track.id))
@@ -1064,8 +1438,12 @@ fn start_track(
         } else {
             0.0
         });
-        ui.set_playing(true);
+        ui.set_playing(autoplay);
         ui.set_loading(true);
+        ui.set_lyrics(ModelRc::from(Rc::new(VecModel::from(
+            Vec::<LyricItem>::new(),
+        ))));
+        ui.set_lyric_index(0);
         ui.set_lyric_follow(true);
         ui.set_lyric_scroll_y(0.0);
         ui.set_queue_tracks(ModelRc::from(Rc::new(VecModel::from(track_items_for_ui(
@@ -1074,125 +1452,189 @@ fn start_track(
         ui.set_queue_index(queue_index);
         ui.set_status_text("正在加载音源…".into());
     });
-    runtime.spawn(async move {
-        let url =
-            match netease::resolve_song_url(&state, &track.id, Some(requested_quality.as_str()))
-                .await
-            {
-                Ok(url) => url,
+    // Lyrics are fetched independently from the audio download so a slow CDN
+    // does not keep the previous song's lyrics on screen.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let lyrics = lyrics.clone();
+        let generation = generation.clone();
+        let track_id = lyric_track_id;
+        runtime.spawn(async move {
+            let result = netease::lyric(&state, track_id.clone()).await;
+            if generation.load(Ordering::Relaxed) != request {
+                return;
+            }
+            let lines = match result {
+                Ok(data) => data.lines,
                 Err(error) => {
-                    update_ui(&ui, move |ui| {
-                        ui.set_status_text(error.into());
-                        ui.set_loading(false);
-                        ui.set_playing(false);
-                    });
-                    return;
+                    logger::log("warn", "lyric", &format!("id={track_id} failed: {error}"));
+                    Vec::new()
                 }
             };
-        let response = match state
-            .stream
-            .get(&url)
-            .header(reqwest::header::REFERER, "https://music.163.com/")
-            .header(reqwest::header::ACCEPT, "*/*")
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                let message = format!("下载音源失败: {error}");
-                update_ui(&ui, move |ui| {
-                    ui.set_status_text(message.into());
-                    ui.set_loading(false);
-                    ui.set_playing(false);
-                });
-                return;
-            }
-        };
-        if !response
-            .url()
-            .host_str()
-            .is_some_and(state::is_allowed_audio_host)
-        {
-            update_ui(&ui, move |ui| {
-                ui.set_status_text("音源域名异常".into());
-                ui.set_loading(false);
-                ui.set_playing(false);
-            });
-            return;
-        }
-        if !response.status().is_success() {
-            let message = format!("音源返回 HTTP {}", response.status());
-            update_ui(&ui, move |ui| {
-                ui.set_status_text(message.into());
-                ui.set_loading(false);
-                ui.set_playing(false);
-            });
-            return;
-        }
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes.to_vec(),
-            Err(error) => {
-                let message = format!("读取音源失败: {error}");
-                update_ui(&ui, move |ui| {
-                    ui.set_status_text(message.into());
-                    ui.set_loading(false);
-                    ui.set_playing(false);
-                });
-                return;
-            }
-        };
-        if generation.load(Ordering::Relaxed) != request {
-            return;
-        }
-        let _ = audio.tx.send(AudioCmd::Load(bytes, duration, resume_at));
-        let id = track.id.clone();
-        let cover_endpoint = cover_url(&track.cover_url, 500);
-        let (lyric_result, cover_path) = tokio::join!(netease::lyric(&state, id), async {
-            tokio::time::timeout(Duration::from_secs(6), fetch_cover(&state, cover_endpoint))
-                .await
-                .ok()
-                .flatten()
-        },);
-        if generation.load(Ordering::Relaxed) != request {
-            return;
-        }
-        if let Ok(data) = lyric_result {
-            let lines = data.lines.clone();
             if let Ok(mut current) = lyrics.lock() {
                 *current = lines.clone();
             }
             update_ui(&ui, move |ui| {
-                let items = lines
-                    .iter()
-                    .map(|line| LyricItem {
-                        time: line.time as f32,
-                        text: line.text.clone().into(),
-                        translation: line.translation.clone().unwrap_or_default().into(),
-                    })
-                    .collect::<Vec<_>>();
+                if ui.get_current_id().as_str() != track_id.as_str() {
+                    return;
+                }
+                let items = if lines.is_empty() {
+                    vec![LyricItem {
+                        time: 0.0,
+                        text: "暂无歌词".into(),
+                        translation: "".into(),
+                    }]
+                } else {
+                    lines
+                        .iter()
+                        .map(|line| LyricItem {
+                            time: line.time as f32,
+                            text: line.text.clone().into(),
+                            translation: line.translation.clone().unwrap_or_default().into(),
+                        })
+                        .collect()
+                };
                 ui.set_lyrics(ModelRc::from(Rc::new(VecModel::from(items))));
                 ui.set_lyric_index(0);
                 ui.set_lyric_follow(true);
                 ui.set_lyric_scroll_y(0.0);
             });
-        }
-        if let Some(path) = &cover_path {
-            media::update_track(&track.name, &track.artist, &track.album, Some(path));
-        }
-        if let Some(path) = cover_path {
+        });
+    }
+
+    // Cover and blurred backdrop are also independent of the audio download.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let generation = generation.clone();
+        let prefs = prefs.clone();
+        let track_id = cover_track_id;
+        runtime.spawn(async move {
+            let path =
+                tokio::time::timeout(Duration::from_secs(6), fetch_cover(&state, cover_endpoint))
+                    .await
+                    .ok()
+                    .flatten();
+            if generation.load(Ordering::Relaxed) != request {
+                return;
+            }
+            let Some(path) = path else { return };
+            let image_path = path.clone();
+            let image = tokio::task::spawn_blocking(move || cover_buffer(&image_path))
+                .await
+                .ok()
+                .flatten();
+            let prefs_snapshot = prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
+            let backdrop = if !prefs_snapshot.low_power && prefs_snapshot.cover_accent {
+                let backdrop_path = path.clone();
+                tokio::task::spawn_blocking(move || blurred_backdrop_buffer(&backdrop_path))
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            if generation.load(Ordering::Relaxed) != request {
+                return;
+            }
+            if let Ok(mut slot) = current_art().lock() {
+                *slot = Some((track_id.clone(), path.clone()));
+            }
+            media::update_track(&media_title, &media_artist, &media_album, Some(&path));
             update_ui(&ui, move |ui| {
-                if let Ok(image) = Image::load_from_path(&path) {
-                    ui.set_current_cover_image(image);
+                if ui.get_current_id().as_str() != track_id.as_str() {
+                    return;
                 }
-                if !low_power {
-                    if let Some(backdrop) = blurred_backdrop(&path) {
-                        ui.set_current_backdrop(backdrop);
-                    }
+                if let Some(image) = image {
+                    ui.set_current_cover_image(Image::from_rgba8(image));
+                }
+                if let Some(backdrop) = backdrop {
+                    ui.set_current_backdrop(Image::from_rgba8(backdrop));
                 }
             });
-        }
-        let _ = netease::report_play_start(&state, track.id.clone(), track.album_id.clone()).await;
-    });
+        });
+    }
+
+    // Audio is streamed to a per-play cache file and only then handed to the
+    // decoder; memory stays bounded and a stalled response cannot hang the
+    // player forever.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let generation = generation.clone();
+        let audio = audio.clone();
+        runtime.spawn(async move {
+            let resolved = match netease::resolve_song_url(
+                &state,
+                &audio_track_id,
+                Some(requested_quality.as_str()),
+            )
+            .await
+            {
+                Ok(song) => song,
+                Err(error) => {
+                    report_play_error(&ui, &generation, request, error);
+                    return;
+                }
+            };
+            let quality_track_id = audio_track_id.clone();
+            let actual_quality = if resolved.trial {
+                format!("{} · 试听", quality_label(&resolved.level))
+            } else if track_quality.is_empty() {
+                quality_label(&resolved.level).to_string()
+            } else {
+                format!("{} · {}", quality_label(&resolved.level), track_quality)
+            };
+            update_ui(&ui, move |ui| {
+                if ui.get_current_id().as_str() == quality_track_id.as_str() {
+                    ui.set_current_quality(actual_quality.into());
+                }
+            });
+            let path =
+                paths::audio_cache_dir().join(format!("{}-{}.audio", audio_track_id, request));
+            let downloaded = match tokio::time::timeout(
+                AUDIO_DOWNLOAD_TIMEOUT,
+                download_audio(&state, &resolved.url, path.clone()),
+            )
+            .await
+            {
+                Ok(Ok(path)) => path,
+                Ok(Err(error)) => {
+                    report_play_error(&ui, &generation, request, error);
+                    return;
+                }
+                Err(_) => {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    report_play_error(
+                        &ui,
+                        &generation,
+                        request,
+                        "音源下载超时，请检查网络".to_string(),
+                    );
+                    return;
+                }
+            };
+            if generation.load(Ordering::Relaxed) != request {
+                let _ = tokio::fs::remove_file(&downloaded).await;
+                return;
+            }
+            if audio
+                .tx
+                .send(AudioCmd::Load {
+                    path: downloaded,
+                    resume_at,
+                    token: request,
+                    autoplay,
+                })
+                .is_err()
+            {
+                report_play_error(&ui, &generation, request, "音频播放器未启动".to_string());
+                return;
+            }
+            let _ = netease::report_play_start(&state, audio_track_id, audio_album_id).await;
+        });
+    }
 }
 
 fn toggle_playback(
@@ -1207,13 +1649,18 @@ fn toggle_playback(
 ) {
     if let Some(ui) = weak.upgrade() {
         if ui.get_loading() {
+            set_status_temp(
+                &ui,
+                "歌曲还在加载，请稍候".to_string(),
+                Duration::from_millis(1600),
+            );
             return;
         }
     }
     let loaded = audio
         .snapshot
         .lock()
-        .map(|snapshot| snapshot.loaded)
+        .map(|snapshot| snapshot.loaded && snapshot.token == generation.load(Ordering::Relaxed))
         .unwrap_or(false);
     if !loaded {
         let track = player.lock().ok().and_then(|player| player.current.clone());
@@ -1228,6 +1675,7 @@ fn toggle_playback(
                 generation.clone(),
                 prefs.clone(),
                 track,
+                true,
             );
         }
         return;
@@ -1252,6 +1700,9 @@ fn play_relative(
             Err(_) => return,
         };
         if player.queue.is_empty() {
+            if let Some(ui) = ui.upgrade() {
+                set_status_temp(&ui, "播放队列为空".to_string(), Duration::from_millis(2000));
+            }
             return;
         }
         let next = (player.index as isize + delta).rem_euclid(player.queue.len() as isize) as usize;
@@ -1261,7 +1712,6 @@ fn play_relative(
         player.resume_position = 0.0;
         track
     };
-    save_player(player, 0.0);
     start_track(
         runtime,
         state.clone(),
@@ -1272,6 +1722,7 @@ fn play_relative(
         generation.clone(),
         prefs.clone(),
         track,
+        true,
     );
 }
 
@@ -1282,14 +1733,18 @@ fn load_home(
     catalog: Arc<Mutex<Catalog>>,
 ) {
     runtime.spawn(async move {
+        let epoch = state.session_epoch();
         match netease::home_feed(&state).await {
             Ok(mut home) => {
+                if state.session_epoch() != epoch {
+                    return;
+                }
                 let local = local_recent()
                     .lock()
                     .map(|list| list.clone())
                     .unwrap_or_default();
                 home.recent = merge_recent(&local, &home.recent);
-                home.recent = replace_local_recent(home.recent.clone());
+                let home_error = home.error.clone();
                 if let Ok(mut catalog) = catalog.lock() {
                     catalog.recent = home.recent.clone();
                     catalog.daily = home.daily.clone();
@@ -1346,7 +1801,11 @@ fn load_home(
                         });
                     }
                     let _ = recommended_count;
-                    ui.set_status_text("".into());
+                    if let Some(error) = home_error {
+                        ui.set_status_text(error.into());
+                    } else if !ui.get_login_open() {
+                        ui.set_status_text("".into());
+                    }
                 });
 
                 if let Some(track) = daily_first_cover {
@@ -1363,12 +1822,19 @@ fn load_home(
                             .ok()
                             .flatten()
                             {
+                                if cover_state.session_epoch() != epoch {
+                                    return;
+                                }
+                                let image =
+                                    tokio::task::spawn_blocking(move || cover_buffer(&path))
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                let Some(image) = image else { return };
                                 update_ui(&cover_ui, move |ui| {
-                                    if let Ok(image) = Image::load_from_path(&path) {
-                                        let mut item = ui.get_daily_feature();
-                                        item.cover = image;
-                                        ui.set_daily_feature(item);
-                                    }
+                                    let mut item = ui.get_daily_feature();
+                                    item.cover = Image::from_rgba8(image);
+                                    ui.set_daily_feature(item);
                                 });
                             }
                         });
@@ -1388,12 +1854,19 @@ fn load_home(
                             .ok()
                             .flatten()
                             {
+                                if cover_state.session_epoch() != epoch {
+                                    return;
+                                }
+                                let image =
+                                    tokio::task::spawn_blocking(move || cover_buffer(&path))
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                let Some(image) = image else { return };
                                 update_ui(&cover_ui, move |ui| {
-                                    if let Ok(image) = Image::load_from_path(&path) {
-                                        let mut item = ui.get_feature_playlist();
-                                        item.cover = image;
-                                        ui.set_feature_playlist(item);
-                                    }
+                                    let mut item = ui.get_feature_playlist();
+                                    item.cover = Image::from_rgba8(image);
+                                    ui.set_feature_playlist(item);
                                 });
                             }
                         });
@@ -1420,7 +1893,11 @@ fn load_home(
                     12,
                 ));
             }
-            Err(error) => update_ui(&ui, move |ui| ui.set_status_text(error.into())),
+            Err(error) => {
+                if state.session_epoch() == epoch {
+                    update_ui(&ui, move |ui| ui.set_status_text(error.into()));
+                }
+            }
         }
     });
 }
@@ -1432,24 +1909,34 @@ fn load_library(
     catalog: Arc<Mutex<Catalog>>,
 ) {
     runtime.spawn(async move {
+        let epoch = state.session_epoch();
         match netease::library_data(&state).await {
             Ok(mut library) => {
+                if state.session_epoch() != epoch {
+                    return;
+                }
                 let local = local_recent()
                     .lock()
                     .map(|list| list.clone())
                     .unwrap_or_default();
                 library.recent = merge_recent(&local, &library.recent);
+                let library_error = library.error.clone();
                 if let Ok(mut catalog) = catalog.lock() {
                     catalog.library_playlists = library.playlists.clone();
                     catalog.library_recent = library.recent.clone();
                 }
-                if let Some(liked) = &library.liked {
-                    if let Ok(mut set) = liked_ids().lock() {
-                        *set = liked.tracks.iter().map(|track| track.id.clone()).collect();
+                let likes_pending = like_inflight()
+                    .lock()
+                    .map(|set| !set.is_empty())
+                    .unwrap_or(false);
+                if !likes_pending {
+                    if let Some(liked) = &library.liked {
+                        if let Ok(mut set) = liked_ids().lock() {
+                            *set = liked.tracks.iter().map(|track| track.id.clone()).collect();
+                        }
                     }
                 }
                 let recent_covers = library.recent.clone();
-                let playlist_count = library.playlists.len();
                 let all_playlists = library.playlists.clone();
                 update_ui(&ui, move |ui| {
                     ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(
@@ -1464,8 +1951,11 @@ fn load_library(
                         .map(|set| set.contains(&current_id))
                         .unwrap_or(false);
                     ui.set_current_liked(liked);
-                    let _ = playlist_count;
-                    ui.set_status_text("".into());
+                    if let Some(error) = library_error {
+                        ui.set_status_text(error.into());
+                    } else if !ui.get_login_open() {
+                        ui.set_status_text("".into());
+                    }
                 });
                 tokio::spawn(load_track_covers(
                     state.clone(),
@@ -1482,7 +1972,11 @@ fn load_library(
                     200,
                 ));
             }
-            Err(error) => update_ui(&ui, move |ui| ui.set_status_text(error.into())),
+            Err(error) => {
+                if state.session_epoch() == epoch {
+                    update_ui(&ui, move |ui| ui.set_status_text(error.into()));
+                }
+            }
         }
     });
 }
@@ -1490,49 +1984,20 @@ fn load_library(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     libnetease::init();
     logger::init(paths::log_dir());
+    paths::clean_audio_cache();
+    paths::trim_cover_cache(3000);
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    listener.set_nonblocking(true)?;
-    let address = listener.local_addr()?;
-    let state = Arc::new(AppState::new(ProxyInfo {
-        base: format!("http://{address}"),
-        token: format!("{:x}", rand::random::<u64>()),
-    }));
+    let state = Arc::new(AppState::new());
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?,
     );
-    {
-        let state = state.clone();
-        runtime.spawn(async move {
-            match tokio::net::TcpListener::from_std(listener) {
-                Ok(listener) => {
-                    if let Err(error) = proxy::serve(listener, (*state).clone()).await {
-                        logger::log("error", "proxy", &format!("{error}"));
-                    }
-                }
-                Err(error) => logger::log("error", "proxy", &format!("{error}")),
-            }
-        });
-    }
 
     let ui = AppWindow::new()?;
     watch_window_restore();
     media::start();
     let weak = ui.as_weak();
-    // `root.close()` only hides the Slint window; without quitting the event
-    // loop the process stays alive with no visible window and keeps the exe
-    // locked. Handle both the custom X button and the system close request.
-    ui.window().on_close_requested(|| {
-        schedule_forced_exit();
-        let _ = slint::quit_event_loop();
-        slint::CloseRequestResponse::HideWindow
-    });
-    ui.on_quit_app(|| {
-        schedule_forced_exit();
-        let _ = slint::quit_event_loop();
-    });
     // A couple of full-window repaints after startup also cover the first-map
     // partial-frame variants of the same software-renderer bug.
     for delay in [500u64, 1400u64] {
@@ -1549,6 +2014,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generation = Arc::new(AtomicU64::new(0));
     let qr_generation = Arc::new(AtomicU64::new(0));
     let search_generation = Arc::new(AtomicU64::new(0));
+    let detail_generation = Arc::new(AtomicU64::new(0));
     let player_anim = Arc::new(AtomicU64::new(0));
     let detail_history = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
     let prefs = Arc::new(Mutex::new(load_prefs()));
@@ -1558,6 +2024,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|prefs| prefs.clone())
         .unwrap_or_default();
     let audio = spawn_audio();
+    {
+        // Persist synchronously before quitting, and only then let the 5s
+        // force-exit fallback proceed.
+        let player_close = player.clone();
+        let audio_close = audio.clone();
+        let generation_close = generation.clone();
+        ui.window().on_close_requested(move || {
+            save_before_exit(&player_close, &audio_close, &generation_close);
+            schedule_forced_exit();
+            let _ = slint::quit_event_loop();
+            slint::CloseRequestResponse::HideWindow
+        });
+        let player_quit = player.clone();
+        let audio_quit = audio.clone();
+        let generation_quit = generation.clone();
+        ui.on_quit_app(move || {
+            save_before_exit(&player_quit, &audio_quit, &generation_quit);
+            schedule_forced_exit();
+            let _ = slint::quit_event_loop();
+        });
+    }
+    {
+        // Periodic checkpoint, matching Tauri's 5s persistence. This also
+        // covers a crash/force-kill without writing position 0 on every
+        // track switch.
+        let player = player.clone();
+        let audio = audio.clone();
+        let generation = generation.clone();
+        let timer = Timer::default();
+        timer.start(TimerMode::Repeated, Duration::from_secs(5), move || {
+            if !player
+                .lock()
+                .map(|player| player.queue.is_empty())
+                .unwrap_or(true)
+            {
+                let position = current_position(&audio, &player, &generation);
+                save_player(&player, position);
+            }
+        });
+        std::mem::forget(timer);
+    }
+    {
+        // Keep the Windows media flyout's timeline in sync without flooding
+        // the SMTC worker: once per second is enough for its progress bar.
+        let weak = weak.clone();
+        let audio = audio.clone();
+        let generation = generation.clone();
+        let timer = Timer::default();
+        timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let token = generation.load(Ordering::Relaxed);
+            if let Ok(snapshot) = audio.snapshot.lock() {
+                if snapshot.token == token && (snapshot.loaded || snapshot.ended) {
+                    let duration = if snapshot.duration > 0.5 {
+                        snapshot.duration
+                    } else {
+                        ui.get_duration()
+                    };
+                    if duration > 0.5 {
+                        media::update_position(snapshot.position, duration);
+                    }
+                }
+            }
+        });
+        std::mem::forget(timer);
+    }
     ui.set_volume(snapshot.volume);
     ui.set_quality(snapshot.quality.clone().into());
     ui.set_low_power(snapshot.low_power);
@@ -1715,7 +2247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         ui.set_playing(false);
         media::update_track(&track.name, &track.artist, &track.album, None);
-        media::update_playback(false);
+        set_media_playing(false);
         let cover_endpoint = cover_url(&track.cover_url, 500);
         if !cover_endpoint.is_empty() {
             let cover_state = state.clone();
@@ -1723,19 +2255,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let media_title = track.name.clone();
             let media_artist = track.artist.clone();
             let media_album = track.album.clone();
+            let restored_id = track.id.clone();
             let prefs = prefs.clone();
+            let restore_generation = generation.clone();
+            let restore_request = generation.load(Ordering::Relaxed);
             runtime.spawn(async move {
                 if let Some(path) = fetch_cover(&cover_state, cover_endpoint).await {
+                    if restore_generation.load(Ordering::Relaxed) != restore_request {
+                        return;
+                    }
+                    if let Ok(mut slot) = current_art().lock() {
+                        *slot = Some((restored_id.clone(), path.clone()));
+                    }
                     media::update_track(&media_title, &media_artist, &media_album, Some(&path));
-                    let low_power = prefs.lock().map(|prefs| prefs.low_power).unwrap_or(false);
+                    let prefs_snapshot =
+                        prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
+                    let image_path = path.clone();
+                    let image = tokio::task::spawn_blocking(move || cover_buffer(&image_path))
+                        .await
+                        .ok()
+                        .flatten();
+                    let backdrop = if !prefs_snapshot.low_power && prefs_snapshot.cover_accent {
+                        let backdrop_path = path;
+                        tokio::task::spawn_blocking(move || blurred_backdrop_buffer(&backdrop_path))
+                            .await
+                            .ok()
+                            .flatten()
+                    } else {
+                        None
+                    };
                     update_ui(&cover_ui, move |ui| {
-                        if let Ok(image) = Image::load_from_path(&path) {
-                            ui.set_current_cover_image(image);
+                        if ui.get_current_id().as_str() != restored_id.as_str() {
+                            return;
                         }
-                        if !low_power {
-                            if let Some(backdrop) = blurred_backdrop(&path) {
-                                ui.set_current_backdrop(backdrop);
-                            }
+                        if let Some(image) = image {
+                            ui.set_current_cover_image(Image::from_rgba8(image));
+                        }
+                        if let Some(backdrop) = backdrop {
+                            ui.set_current_backdrop(Image::from_rgba8(backdrop));
                         }
                     });
                 }
@@ -1786,6 +2343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui.set_account_name(account.nickname.into());
                                             ui.set_account_id(account.user_id.into());
                                             ui.set_account_initial(initial.into());
+                                            ui.set_cookie_text("".into());
                                             ui.set_status_text("登录成功，正在同步音乐库…".into());
                                         });
                                         load_home(
@@ -1826,12 +2384,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let weak = weak.clone();
         let catalog = catalog.clone();
+        let qr_generation = qr_generation.clone();
         ui.on_import_cookie(move |cookie| {
             let runtime = runtime.clone();
             let task_runtime = runtime.clone();
             let state = state.clone();
             let weak = weak.clone();
             let catalog = catalog.clone();
+            let qr_generation = qr_generation.clone();
+            qr_generation.fetch_add(1, Ordering::Relaxed);
             runtime.spawn(async move {
                 match auth::import_cookie(&state, cookie.to_string()).await {
                     Ok(account) => {
@@ -1842,6 +2403,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_account_name(account.nickname.into());
                             ui.set_account_id(account.user_id.into());
                             ui.set_account_initial(initial.into());
+                            ui.set_cookie_text("".into());
                             ui.set_status_text("Cookie 导入成功".into());
                         });
                         load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
@@ -1855,9 +2417,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = weak.clone();
+        let qr_generation = qr_generation.clone();
         ui.on_close_login(move || {
+            // Stop the in-flight QR poll loop; otherwise it keeps running
+            // behind the closed dialog and can log the user in unexpectedly.
+            qr_generation.fetch_add(1, Ordering::Relaxed);
             if let Some(ui) = weak.upgrade() {
                 ui.set_login_open(false);
+                ui.set_cookie_text("".into());
             }
         });
     }
@@ -1866,12 +2433,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let runtime = runtime.clone();
         let state = state.clone();
         let weak = weak.clone();
+        let catalog = catalog.clone();
+        let audio = audio.clone();
+        let player = player.clone();
+        let generation = generation.clone();
+        let search_generation = search_generation.clone();
+        let detail_generation = detail_generation.clone();
+        let detail_history = detail_history.clone();
+        let player_anim = player_anim.clone();
         ui.on_logout(move || {
             let runtime = runtime.clone();
+            let task_runtime = runtime.clone();
             let state = state.clone();
             let weak = weak.clone();
+            let catalog = catalog.clone();
+            let audio = audio.clone();
+            let player = player.clone();
+            let generation = generation.clone();
+            let search_generation = search_generation.clone();
+            let detail_generation = detail_generation.clone();
+            let detail_history = detail_history.clone();
+            let player_anim = player_anim.clone();
             runtime.spawn(async move {
-                let _ = auth::logout(&state).await;
+                player_anim.fetch_add(1, Ordering::Relaxed);
+                let logout_result = auth::logout(&state).await;
+                let request = generation.fetch_add(1, Ordering::Relaxed) + 1;
+                search_generation.fetch_add(1, Ordering::Relaxed);
+                detail_generation.fetch_add(1, Ordering::Relaxed);
+                let _ = audio.tx.send(AudioCmd::Stop { token: request });
+                if let Ok(mut player) = player.lock() {
+                    player.queue.clear();
+                    player.index = 0;
+                    player.current = None;
+                    player.resume_position = 0.0;
+                }
+                if let Ok(mut slot) = current_art().lock() {
+                    *slot = None;
+                }
+                if let Ok(mut catalog) = catalog.lock() {
+                    catalog.detail.clear();
+                    catalog.search_songs.clear();
+                    catalog.search_playlists.clear();
+                    catalog.search_lyric_tracks.clear();
+                    catalog.library_playlists.clear();
+                    catalog.library_recent.clear();
+                }
+                let history_clear = detail_history.clone();
+                if let Ok(mut history) = history_clear.lock() {
+                    history.clear();
+                }
+                let _ = fs::remove_file(paths::data_dir().join("last-playback.json"));
+                media::clear();
+                set_media_playing(false);
                 update_ui(&weak, move |ui| {
                     ui.set_logged_in(false);
                     ui.set_login_open(true);
@@ -1882,9 +2495,113 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         set.clear();
                     }
                     ui.set_current_liked(false);
-                    ui.set_status_text("已退出登录".into());
+                    ui.set_current_id("".into());
+                    ui.set_current_title("".into());
+                    ui.set_current_artist("".into());
+                    ui.set_current_album("".into());
+                    ui.set_current_quality("".into());
+                    ui.set_current_cover_image(Image::default());
+                    ui.set_current_backdrop(Image::default());
+                    ui.set_lyrics(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<LyricItem>::new(),
+                    ))));
+                    ui.set_lyric_index(0);
+                    ui.set_playing(false);
+                    ui.set_loading(false);
+                    ui.set_progress(0.0);
+                    ui.set_duration(0.0);
+                    ui.set_position_text("00:00".into());
+                    ui.set_duration_text("00:00".into());
+                    ui.set_queue_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_queue_index(0);
+                    ui.set_queue_open(false);
+                    ui.set_player_open(false);
+                    ui.set_player_visible(false);
+                    ui.set_cover_flying(false);
+                    ui.set_workspace_hidden(false);
+                    ui.set_controls_ready(true);
+                    ui.set_detail_kind("".into());
+                    ui.set_detail_id("".into());
+                    ui.set_detail_title("".into());
+                    ui.set_detail_meta("".into());
+                    ui.set_detail_description("".into());
+                    ui.set_detail_first_id("".into());
+                    ui.set_detail_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_detail_albums(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<PlaylistItem>::new(),
+                    ))));
+                    ui.set_library_playlists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        PlaylistItem,
+                    >::new(
+                    )))));
+                    ui.set_library_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_search_text("".into());
+                    ui.set_search_query("".into());
+                    ui.set_search_loading(false);
+                    ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_search_playlists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        PlaylistItem,
+                    >::new(
+                    )))));
+                    ui.set_search_artists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        PlaylistItem,
+                    >::new(
+                    )))));
+                    ui.set_search_albums(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<PlaylistItem>::new(),
+                    ))));
+                    ui.set_search_lyrics(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        LyricResultItem,
+                    >::new(
+                    )))));
+                    ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_daily_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_new_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<PlaylistItem>::new(),
+                    ))));
+                    ui.set_daily_feature(PlaylistItem {
+                        id: "daily".into(),
+                        title: "每日推荐".into(),
+                        meta: "登录后同步每日推荐".into(),
+                        cover: Image::default(),
+                        tint: Color::from_rgb_u8(201, 32, 39),
+                    });
+                    ui.set_feature_playlist(PlaylistItem {
+                        id: "".into(),
+                        title: "发现音乐".into(),
+                        meta: "登录后获取推荐歌单".into(),
+                        cover: Image::default(),
+                        tint: Color::from_rgb_u8(60, 40, 80),
+                    });
+                    switch_page(ui, "home");
+                    ui.set_status_text(
+                        if logout_result.is_ok() {
+                            "已退出登录"
+                        } else {
+                            "已退出登录（本地凭证清理失败）"
+                        }
+                        .into(),
+                    );
                     ui.invoke_refresh_qr();
                 });
+                // Rebuild the home page from public data; no previous-account
+                // personal playlists/history remain in the UI.
+                load_home(&task_runtime, state, weak, catalog);
             });
         });
     }
@@ -1895,16 +2612,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let catalog = catalog.clone();
         let detail_history = detail_history.clone();
+        let search_generation = search_generation.clone();
+        let detail_generation = detail_generation.clone();
         ui.on_nav(move |page| {
             let page = page.to_string();
+            // Navigating away cancels any in-flight search/detail response so
+            // it cannot force the old page back.
+            search_generation.fetch_add(1, Ordering::Relaxed);
+            detail_generation.fetch_add(1, Ordering::Relaxed);
             if let Some(mut history) = detail_history.lock().ok() {
                 history.clear();
             }
+            let logged_in = weak.upgrade().map(|ui| ui.get_logged_in()).unwrap_or(false);
             if let Some(ui) = weak.upgrade() {
                 switch_page(&ui, &page);
             }
-            if page == "library" {
+            if page == "library" && logged_in {
                 load_library(&runtime, state.clone(), weak.clone(), catalog.clone());
+            }
+            if page == "home" {
+                load_home(&runtime, state.clone(), weak.clone(), catalog.clone());
             }
         });
     }
@@ -1915,22 +2642,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = weak.clone();
         let catalog = catalog.clone();
         let search_generation = search_generation.clone();
+        let detail_generation = detail_generation.clone();
         let detail_history = detail_history.clone();
-        ui.on_search(move |keyword| {
+        ui.on_search(move |keyword, kind| {
             let runtime = runtime.clone();
             let state = state.clone();
             let weak = weak.clone();
             let catalog = catalog.clone();
             let search_generation = search_generation.clone();
+            let detail_generation = detail_generation.clone();
             let detail_history = detail_history.clone();
+            detail_generation.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut history) = detail_history.lock() {
                 history.clear();
             }
             let request = search_generation.fetch_add(1, Ordering::Relaxed) + 1;
             let keyword = keyword.to_string();
-            runtime.spawn(async move {
-                update_ui(&weak, |ui| {
+            let kind = kind.to_string();
+            let lyric_search = kind == "lyric";
+            let lyric_keyword = keyword.clone();
+            if keyword.trim().is_empty() {
+                update_ui(&weak, move |ui| {
                     switch_page(ui, "search");
+                    ui.set_search_query("".into());
+                    ui.set_search_loading(false);
+                    ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
+                    ui.set_search_playlists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        PlaylistItem,
+                    >::new(
+                    )))));
+                    ui.set_search_artists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        PlaylistItem,
+                    >::new(
+                    )))));
+                    ui.set_search_albums(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<PlaylistItem>::new(),
+                    ))));
+                    ui.set_search_lyrics(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                        LyricResultItem,
+                    >::new(
+                    )))));
+                    ui.set_status_text("".into());
+                });
+                return;
+            }
+            let display_keyword = keyword.clone();
+            let wait_for_lyric = lyric_search;
+            runtime.spawn(async move {
+                update_ui(&weak, move |ui| {
+                    switch_page(ui, "search");
+                    ui.set_search_query(display_keyword.into());
+                    ui.set_search_loading(true);
+                    ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
+                        Vec::<TrackItem>::new(),
+                    ))));
                     ui.set_status_text("正在搜索…".into());
                 });
                 match netease::search_music(&state, keyword).await {
@@ -1954,6 +2721,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .map(|album| (album.id.clone(), album.cover_url.clone()))
                             .collect::<Vec<_>>();
                         let song_covers = data.songs.clone();
+                        let search_error = data.error.clone();
                         update_ui(&weak, move |ui| {
                             ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
                                 track_items_for_ui(&data.songs),
@@ -1967,8 +2735,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_search_albums(ModelRc::from(Rc::new(VecModel::from(
                                 album_items_for_ui(&data.albums),
                             ))));
+                            if !wait_for_lyric {
+                                ui.set_search_loading(false);
+                            }
                             let _ = data.songs.len();
-                            ui.set_status_text("".into());
+                            if let Some(error) = search_error {
+                                ui.set_status_text(error.into());
+                            } else {
+                                ui.set_status_text("".into());
+                            }
                         });
                         tokio::spawn(load_track_covers(
                             state.clone(),
@@ -2000,8 +2775,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             120,
                             24,
                         ));
+                        if lyric_search {
+                            let lyric_state = state.clone();
+                            let lyric_ui = weak.clone();
+                            let lyric_generation = search_generation.clone();
+                            let lyric_catalog = catalog.clone();
+                            tokio::spawn(async move {
+                                let result = netease::search_kind(
+                                    &lyric_state,
+                                    "lyric".to_string(),
+                                    lyric_keyword,
+                                )
+                                .await;
+                                if lyric_generation.load(Ordering::Relaxed) != request {
+                                    return;
+                                }
+                                match result {
+                                    Ok(data) => {
+                                        if let Ok(mut catalog) = lyric_catalog.lock() {
+                                            catalog.search_lyric_tracks = data
+                                                .lyrics
+                                                .iter()
+                                                .map(|item| item.track.clone())
+                                                .collect();
+                                        }
+                                        update_ui(&lyric_ui, move |ui| {
+                                            ui.set_search_lyrics(ModelRc::from(Rc::new(
+                                                VecModel::from(lyric_result_items_for_ui(
+                                                    &data.lyrics,
+                                                )),
+                                            )));
+                                            ui.set_search_loading(false);
+                                        });
+                                    }
+                                    Err(error) => update_ui(&lyric_ui, move |ui| {
+                                        ui.set_search_loading(false);
+                                        ui.set_search_lyrics(ModelRc::from(Rc::new(
+                                            VecModel::from(Vec::<LyricResultItem>::new()),
+                                        )));
+                                        ui.set_status_text(error.into());
+                                    }),
+                                }
+                            });
+                        }
                     }
-                    Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
+                    Err(error) => {
+                        if search_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
+                        update_ui(&weak, move |ui| {
+                            ui.set_search_loading(false);
+                            // Hiding the old query prevents stale results and
+                            // a misleading "no results" state on failure.
+                            ui.set_search_query("".into());
+                            ui.set_status_text(error.into());
+                        });
+                    }
                 }
             });
         });
@@ -2014,6 +2843,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let catalog = catalog.clone();
         let prefs = prefs.clone();
         let detail_history = detail_history.clone();
+        let detail_generation = detail_generation.clone();
         ui.on_open_playlist(move |id| {
             let runtime = runtime.clone();
             let state = state.clone();
@@ -2021,11 +2851,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let catalog = catalog.clone();
             let prefs = prefs.clone();
             let detail_history = detail_history.clone();
+            let detail_generation = detail_generation.clone();
             let id = id.to_string();
             if let Some(ui) = weak.upgrade() {
                 let page = ui.get_page().to_string();
+                let existing_origin = ui.get_detail_origin().to_string();
                 let origin = if page == "detail" {
-                    "home".to_string()
+                    if existing_origin.is_empty() {
+                        "home".to_string()
+                    } else {
+                        existing_origin
+                    }
                 } else {
                     page
                 };
@@ -2034,9 +2870,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(mut history) = detail_history.lock() {
                 history.clear();
             }
+            let request = detail_generation.fetch_add(1, Ordering::Relaxed) + 1;
             runtime.spawn(async move {
                 match netease::playlist_detail(&state, id).await {
                     Ok(playlist) => {
+                        if detail_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
                         if let Ok(mut catalog) = catalog.lock() {
                             catalog.detail = playlist.tracks.clone();
                         }
@@ -2062,7 +2902,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_detail_description(description.into());
                             ui.set_detail_first_id(first_id.into());
                             ui.set_detail_cover_tint(cover_tint);
-                            ui.set_detail_cover_image(Image::default());
                             ui.set_detail_backdrop(Image::default());
                             ui.set_detail_albums(ModelRc::from(Rc::new(VecModel::from(Vec::<
                                 PlaylistItem,
@@ -2077,12 +2916,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             weak.clone(),
                             TrackTarget::Detail,
                             track_covers,
-                            600,
+                            200,
                         ));
                         if !cover_endpoint.is_empty() {
                             let cover_state = state.clone();
                             let cover_ui = weak.clone();
-                            let cover_title = playlist.name.clone();
+                            let cover_id = playlist.id.clone();
+                            let cover_generation = detail_generation.clone();
                             tokio::spawn(async move {
                                 if let Some(path) = tokio::time::timeout(
                                     Duration::from_secs(8),
@@ -2092,25 +2932,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .ok()
                                 .flatten()
                                 {
-                                    let low_power =
-                                        prefs.lock().map(|prefs| prefs.low_power).unwrap_or(false);
+                                    if cover_generation.load(Ordering::Relaxed) != request {
+                                        return;
+                                    }
+                                    let prefs_snapshot =
+                                        prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
+                                    let backdrop = if !prefs_snapshot.low_power
+                                        && prefs_snapshot.cover_accent
+                                    {
+                                        let backdrop_path = path;
+                                        tokio::task::spawn_blocking(move || {
+                                            blurred_backdrop_buffer(&backdrop_path)
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                    } else {
+                                        None
+                                    };
+                                    let Some(backdrop) = backdrop else {
+                                        return;
+                                    };
                                     update_ui(&cover_ui, move |ui| {
-                                        if ui.get_detail_title().as_str() == cover_title {
-                                            if let Ok(image) = Image::load_from_path(&path) {
-                                                ui.set_detail_cover_image(image);
-                                            }
-                                            if !low_power {
-                                                if let Some(backdrop) = blurred_backdrop(&path) {
-                                                    ui.set_detail_backdrop(backdrop);
-                                                }
-                                            }
+                                        if ui.get_detail_kind().as_str() != "playlist"
+                                            || ui.get_detail_id().as_str() != cover_id.as_str()
+                                        {
+                                            return;
                                         }
+                                        ui.set_detail_backdrop(Image::from_rgba8(backdrop));
                                     });
                                 }
                             });
                         }
                     }
-                    Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
+                    Err(error) => {
+                        if detail_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
+                        update_ui(&weak, move |ui| ui.set_status_text(error.into()));
+                    }
                 }
             });
         });
@@ -2123,6 +2983,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let catalog = catalog.clone();
         let prefs = prefs.clone();
         let detail_history = detail_history.clone();
+        let detail_generation = detail_generation.clone();
         ui.on_open_artist(move |id| {
             let runtime = runtime.clone();
             let state = state.clone();
@@ -2130,6 +2991,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let catalog = catalog.clone();
             let prefs = prefs.clone();
             let detail_history = detail_history.clone();
+            let detail_generation = detail_generation.clone();
             let id = id.to_string();
             if let Some(ui) = weak.upgrade() {
                 if ui.get_page().as_str() == "detail" && ui.get_detail_kind().as_str() == "artist" {
@@ -2138,16 +3000,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 let page = ui.get_page().to_string();
+                let existing_origin = ui.get_detail_origin().to_string();
                 let origin = if page == "detail" {
-                    "home".to_string()
+                    if existing_origin.is_empty() {
+                        "home".to_string()
+                    } else {
+                        existing_origin
+                    }
                 } else {
                     page
                 };
                 ui.set_detail_origin(origin.into());
             }
+            let request = detail_generation.fetch_add(1, Ordering::Relaxed) + 1;
             runtime.spawn(async move {
                 match netease::artist_page(&state, id.clone()).await {
                     Ok(data) => {
+                        if detail_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
+                        let album_error = data.album_error.clone();
                         if let Ok(mut catalog) = catalog.lock() {
                             catalog.detail = data.songs.clone();
                         }
@@ -2190,7 +3062,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_detail_description(description.into());
                             ui.set_detail_first_id(first_id.into());
                             ui.set_detail_cover_tint(tint);
-                            ui.set_detail_cover_image(Image::default());
                             ui.set_detail_backdrop(Image::default());
                             ui.set_detail_albums(ModelRc::from(Rc::new(VecModel::from(
                                 album_items_for_ui(&albums),
@@ -2198,6 +3069,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_detail_tracks(ModelRc::from(Rc::new(VecModel::from(
                                 track_items_for_ui(&songs_for_ui),
                             ))));
+                            if let Some(error) = album_error {
+                                set_status_temp(
+                                    ui,
+                                    format!("专辑加载失败：{error}"),
+                                    Duration::from_millis(3200),
+                                );
+                            }
                         });
                         tokio::spawn(load_track_covers(
                             state.clone(),
@@ -2217,7 +3095,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if !cover_endpoint.is_empty() {
                             let cover_state = state.clone();
                             let cover_ui = weak.clone();
-                            let prefs = prefs.clone();
+                            let cover_generation = detail_generation.clone();
                             let expected_id = artist.id.clone();
                             tokio::spawn(async move {
                                 if let Some(path) = tokio::time::timeout(
@@ -2228,28 +3106,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .ok()
                                 .flatten()
                                 {
-                                    let low_power =
-                                        prefs.lock().map(|prefs| prefs.low_power).unwrap_or(false);
+                                    if cover_generation.load(Ordering::Relaxed) != request {
+                                        return;
+                                    }
+                                    let prefs_snapshot =
+                                        prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
+                                    let backdrop = if !prefs_snapshot.low_power
+                                        && prefs_snapshot.cover_accent
+                                    {
+                                        let backdrop_path = path;
+                                        tokio::task::spawn_blocking(move || {
+                                            blurred_backdrop_buffer(&backdrop_path)
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                    } else {
+                                        None
+                                    };
+                                    let Some(backdrop) = backdrop else {
+                                        return;
+                                    };
                                     update_ui(&cover_ui, move |ui| {
                                         if ui.get_detail_kind().as_str() != "artist"
                                             || ui.get_detail_id().as_str() != expected_id.as_str()
                                         {
                                             return;
                                         }
-                                        if let Ok(image) = Image::load_from_path(&path) {
-                                            ui.set_detail_cover_image(image);
-                                        }
-                                        if !low_power {
-                                            if let Some(backdrop) = blurred_backdrop(&path) {
-                                                ui.set_detail_backdrop(backdrop);
-                                            }
-                                        }
+                                        ui.set_detail_backdrop(Image::from_rgba8(backdrop));
                                     });
                                 }
                             });
                         }
                     }
-                    Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
+                    Err(error) => {
+                        if detail_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
+                        update_ui(&weak, move |ui| ui.set_status_text(error.into()));
+                    }
                 }
             });
         });
@@ -2262,6 +3157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let catalog = catalog.clone();
         let prefs = prefs.clone();
         let detail_history = detail_history.clone();
+        let detail_generation = detail_generation.clone();
         ui.on_open_album(move |id| {
             let runtime = runtime.clone();
             let state = state.clone();
@@ -2269,24 +3165,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let catalog = catalog.clone();
             let prefs = prefs.clone();
             let detail_history = detail_history.clone();
+            let detail_generation = detail_generation.clone();
             let id = id.to_string();
-            if let Some(ui) = weak.upgrade() {
+            let previous_artist = if let Some(ui) = weak.upgrade() {
                 if ui.get_page().as_str() == "detail" && ui.get_detail_kind().as_str() == "artist" {
-                    if let Ok(mut history) = detail_history.lock() {
-                        history.push(("artist".to_string(), ui.get_detail_id().to_string()));
-                    }
+                    Some(ui.get_detail_id().to_string())
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            if let Some(ui) = weak.upgrade() {
                 let page = ui.get_page().to_string();
+                let existing_origin = ui.get_detail_origin().to_string();
                 let origin = if page == "detail" {
-                    "home".to_string()
+                    if existing_origin.is_empty() {
+                        "home".to_string()
+                    } else {
+                        existing_origin
+                    }
                 } else {
                     page
                 };
                 ui.set_detail_origin(origin.into());
             }
+            let history_for_task = detail_history.clone();
+            let request = detail_generation.fetch_add(1, Ordering::Relaxed) + 1;
             runtime.spawn(async move {
                 match netease::album_page(id.clone()).await {
                     Ok(data) => {
+                        if detail_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
+                        // Only record the artist page after navigation
+                        // succeeded; a failed album load must not pollute the
+                        // back stack with the current page itself.
+                        if let Some(artist_id) = previous_artist {
+                            if let Ok(mut history) = history_for_task.lock() {
+                                history.push(("artist".to_string(), artist_id));
+                            }
+                        }
                         if let Ok(mut catalog) = catalog.lock() {
                             catalog.detail = data.songs.clone();
                         }
@@ -2325,7 +3244,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_detail_description(description.into());
                             ui.set_detail_first_id(first_id.into());
                             ui.set_detail_cover_tint(tint);
-                            ui.set_detail_cover_image(Image::default());
                             ui.set_detail_backdrop(Image::default());
                             ui.set_detail_albums(ModelRc::from(Rc::new(VecModel::from(Vec::<
                                 PlaylistItem,
@@ -2345,7 +3263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if !cover_endpoint.is_empty() {
                             let cover_state = state.clone();
                             let cover_ui = weak.clone();
-                            let prefs = prefs.clone();
+                            let cover_generation = detail_generation.clone();
                             let expected_id = album.id.clone();
                             tokio::spawn(async move {
                                 if let Some(path) = tokio::time::timeout(
@@ -2356,28 +3274,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .ok()
                                 .flatten()
                                 {
-                                    let low_power =
-                                        prefs.lock().map(|prefs| prefs.low_power).unwrap_or(false);
+                                    if cover_generation.load(Ordering::Relaxed) != request {
+                                        return;
+                                    }
+                                    let prefs_snapshot =
+                                        prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
+                                    let backdrop = if !prefs_snapshot.low_power
+                                        && prefs_snapshot.cover_accent
+                                    {
+                                        let backdrop_path = path;
+                                        tokio::task::spawn_blocking(move || {
+                                            blurred_backdrop_buffer(&backdrop_path)
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                    } else {
+                                        None
+                                    };
+                                    let Some(backdrop) = backdrop else {
+                                        return;
+                                    };
                                     update_ui(&cover_ui, move |ui| {
                                         if ui.get_detail_kind().as_str() != "album"
                                             || ui.get_detail_id().as_str() != expected_id.as_str()
                                         {
                                             return;
                                         }
-                                        if let Ok(image) = Image::load_from_path(&path) {
-                                            ui.set_detail_cover_image(image);
-                                        }
-                                        if !low_power {
-                                            if let Some(backdrop) = blurred_backdrop(&path) {
-                                                ui.set_detail_backdrop(backdrop);
-                                            }
-                                        }
+                                        ui.set_detail_backdrop(Image::from_rgba8(backdrop));
                                     });
                                 }
                             });
                         }
                     }
-                    Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
+                    Err(error) => {
+                        if detail_generation.load(Ordering::Relaxed) != request {
+                            return;
+                        }
+                        update_ui(&weak, move |ui| ui.set_status_text(error.into()));
+                    }
                 }
             });
         });
@@ -2386,10 +3321,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = weak.clone();
         let detail_history = detail_history.clone();
+        let detail_generation = detail_generation.clone();
         ui.on_back_detail(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            detail_generation.fetch_add(1, Ordering::Relaxed);
             let kind = ui.get_detail_kind().to_string();
             if kind == "artist" || kind == "album" {
                 let previous = detail_history
@@ -2405,8 +3342,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     return;
                 }
+                let origin = ui.get_detail_origin().to_string();
                 ui.set_detail_kind("".into());
-                switch_page(&ui, "search");
+                switch_page(&ui, if origin.is_empty() { "search" } else { &origin });
             } else if kind == "playlist" {
                 let origin = ui.get_detail_origin().to_string();
                 ui.set_detail_kind("".into());
@@ -2425,7 +3363,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let catalog = catalog.clone();
         let prefs = prefs.clone();
         let detail_history = detail_history.clone();
+        let detail_generation = detail_generation.clone();
         ui.on_open_daily(move || {
+            let request = detail_generation.fetch_add(1, Ordering::Relaxed) + 1;
             if let Ok(mut history) = detail_history.lock() {
                 history.clear();
             }
@@ -2470,7 +3410,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_detail_description("根据你的音乐口味每日更新".into());
                 ui.set_detail_first_id(first_id.into());
                 ui.set_detail_cover_tint(tint);
-                ui.set_detail_cover_image(Image::default());
                 ui.set_detail_backdrop(Image::default());
                 ui.set_detail_albums(ModelRc::from(Rc::new(VecModel::from(
                     Vec::<PlaylistItem>::new(),
@@ -2484,14 +3423,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 weak.clone(),
                 TrackTarget::Detail,
                 tracks,
-                600,
+                200,
             ));
             if let Some(track) = first {
                 let cover_endpoint = cover_url(&track.cover_url, 500);
                 if !cover_endpoint.is_empty() {
                     let cover_state = state.clone();
                     let cover_ui = weak.clone();
-                    let prefs = prefs.clone();
+                    let cover_prefs = prefs.clone();
+                    let cover_generation = detail_generation.clone();
                     runtime.spawn(async move {
                         if let Some(path) = tokio::time::timeout(
                             Duration::from_secs(8),
@@ -2501,22 +3441,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ok()
                         .flatten()
                         {
-                            let low_power =
-                                prefs.lock().map(|prefs| prefs.low_power).unwrap_or(false);
+                            if cover_generation.load(Ordering::Relaxed) != request {
+                                return;
+                            }
+                            let prefs_snapshot = cover_prefs
+                                .lock()
+                                .map(|prefs| prefs.clone())
+                                .unwrap_or_default();
+                            let backdrop =
+                                if !prefs_snapshot.low_power && prefs_snapshot.cover_accent {
+                                    let backdrop_path = path;
+                                    tokio::task::spawn_blocking(move || {
+                                        blurred_backdrop_buffer(&backdrop_path)
+                                    })
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                } else {
+                                    None
+                                };
+                            let Some(backdrop) = backdrop else {
+                                return;
+                            };
                             update_ui(&cover_ui, move |ui| {
                                 if ui.get_page().as_str() != "detail"
-                                    || ui.get_detail_title().as_str() != "每日推荐"
+                                    || ui.get_detail_kind().as_str() != "daily"
                                 {
                                     return;
                                 }
-                                if let Ok(image) = Image::load_from_path(&path) {
-                                    ui.set_detail_cover_image(image);
-                                }
-                                if !low_power {
-                                    if let Some(backdrop) = blurred_backdrop(&path) {
-                                        ui.set_detail_backdrop(backdrop);
-                                    }
-                                }
+                                ui.set_detail_backdrop(Image::from_rgba8(backdrop));
                             });
                         }
                     });
@@ -2535,20 +3488,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let generation = generation.clone();
         let audio = audio.clone();
         let prefs = prefs.clone();
-        ui.on_play_track(move |id| {
-            let Some((track, context)) = catalog
+        ui.on_play_track(move |id, context| {
+            let id = id.to_string();
+            let context = context.to_string();
+            let resolved = catalog
                 .lock()
                 .ok()
-                .and_then(|catalog| find_track(&catalog, id.as_str()))
+                .and_then(|catalog| find_track_in_context(&catalog, &context, &id))
                 .or_else(|| {
                     let local = local_recent().lock().ok()?.clone();
                     local
                         .iter()
-                        .find(|track| track.id == id.as_str())
+                        .find(|track| track.id == id)
                         .cloned()
                         .map(|track| (track, local))
                 })
-            else {
+                .or_else(|| {
+                    catalog
+                        .lock()
+                        .ok()
+                        .and_then(|catalog| find_track(&catalog, &id))
+                });
+            let Some((track, context)) = resolved else {
                 return;
             };
             let index = context
@@ -2561,7 +3522,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.current = Some(track.clone());
                 player.resume_position = 0.0;
             }
-            save_player(&player, 0.0);
             start_track(
                 &runtime,
                 state.clone(),
@@ -2572,6 +3532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 generation.clone(),
                 prefs.clone(),
                 track,
+                true,
             );
         });
     }
@@ -2609,7 +3570,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.current = Some(track.clone());
                 player.resume_position = 0.0;
             }
-            save_player(&player, 0.0);
             start_track(
                 &runtime,
                 state.clone(),
@@ -2620,32 +3580,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 generation.clone(),
                 prefs.clone(),
                 track,
+                true,
             );
         });
     }
 
     {
+        let runtime = runtime.clone();
         let weak = weak.clone();
         let prefs = prefs.clone();
         ui.on_set_low_power(move |value| {
-            let mut saved = prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
-            saved.low_power = value;
-            save_prefs(&saved);
-            if let Some(ui) = weak.upgrade() {
-                ui.set_low_power(value);
+            if let Ok(mut locked) = prefs.lock() {
+                locked.low_power = value;
+                save_prefs(&locked);
+            }
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            ui.set_low_power(value);
+            // Do not clear the already generated backdrop: if the user
+            // turns performance mode off again, the current track must
+            // regain its ambience without waiting for the next track.
+            set_status_temp(
+                &ui,
                 if value {
-                    ui.set_current_backdrop(Image::default());
-                    ui.set_detail_backdrop(Image::default());
-                }
-                set_status_temp(
-                    &ui,
-                    if value {
-                        "已开启性能模式：暂停封面模糊".to_string()
-                    } else {
-                        "已关闭性能模式".to_string()
-                    },
-                    Duration::from_millis(2400),
-                );
+                    "已开启性能模式：暂停生成封面模糊".to_string()
+                } else {
+                    "已关闭性能模式".to_string()
+                },
+                Duration::from_millis(2400),
+            );
+            if value {
+                return;
+            }
+            let accent = prefs.lock().map(|prefs| prefs.cover_accent).unwrap_or(true);
+            if !accent {
+                return;
+            }
+            let art = current_art().lock().ok().and_then(|slot| slot.clone());
+            if let Some((id, path)) = art {
+                let ui_weak = ui.as_weak();
+                runtime.spawn(async move {
+                    let buffer =
+                        tokio::task::spawn_blocking(move || blurred_backdrop_buffer(&path))
+                            .await
+                            .ok()
+                            .flatten();
+                    let Some(buffer) = buffer else { return };
+                    update_ui(&ui_weak, move |ui| {
+                        if ui.get_current_id().as_str() == id.as_str() {
+                            ui.set_current_backdrop(Image::from_rgba8(buffer));
+                        }
+                    });
+                });
             }
         });
     }
@@ -2654,17 +3641,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = weak.clone();
         let prefs = prefs.clone();
         ui.on_set_cover_accent(move |value| {
-            let mut saved = prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
-            saved.cover_accent = value;
-            save_prefs(&saved);
+            if let Ok(mut locked) = prefs.lock() {
+                locked.cover_accent = value;
+                save_prefs(&locked);
+            }
             if let Some(ui) = weak.upgrade() {
                 ui.set_cover_accent(value);
                 set_status_temp(
                     &ui,
                     if value {
-                        "已开启封面取色".to_string()
+                        "已显示封面氛围背景".to_string()
                     } else {
-                        "已关闭封面取色".to_string()
+                        "已隐藏封面氛围背景".to_string()
                     },
                     Duration::from_millis(2400),
                 );
@@ -2676,9 +3664,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = weak.clone();
         let prefs = prefs.clone();
         ui.on_set_show_translation(move |value| {
-            let mut saved = prefs.lock().map(|prefs| prefs.clone()).unwrap_or_default();
-            saved.show_translation = value;
-            save_prefs(&saved);
+            if let Ok(mut locked) = prefs.lock() {
+                locked.show_translation = value;
+                save_prefs(&locked);
+            }
             if let Some(ui) = weak.upgrade() {
                 ui.set_show_translation(value);
                 set_status_temp(
@@ -2746,7 +3735,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 player.resume_position = 0.0;
                 track
             };
-            save_player(&player, 0.0);
             if let Some(ui) = weak.upgrade() {
                 ui.set_queue_open(false);
             }
@@ -2760,6 +3748,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 generation.clone(),
                 prefs.clone(),
                 track,
+                true,
             );
         });
     }
@@ -2795,16 +3784,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if !ui.get_logged_in() {
+                set_status_temp(
+                    &ui,
+                    "登录后才能喜欢歌曲".to_string(),
+                    Duration::from_millis(2400),
+                );
+                return;
+            }
             let id = ui.get_current_id().to_string();
             if id.is_empty() {
+                return;
+            }
+            let already_pending = like_inflight()
+                .lock()
+                .map(|mut set| !set.insert(id.clone()))
+                .unwrap_or(false);
+            if already_pending {
                 return;
             }
             let liked = ui.get_current_liked();
             let runtime = runtime.clone();
             let state = state.clone();
             let weak = weak.clone();
+            let epoch = state.session_epoch();
             runtime.spawn(async move {
-                match netease::like_song(&state, id.clone(), !liked).await {
+                let result = netease::like_song(&state, id.clone(), !liked).await;
+                if let Ok(mut set) = like_inflight().lock() {
+                    set.remove(&id);
+                }
+                if state.session_epoch() != epoch {
+                    return;
+                }
+                match result {
                     Ok(result) => {
                         if let Ok(mut set) = liked_ids().lock() {
                             if result.liked {
@@ -2814,16 +3826,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         update_ui(&weak, move |ui| {
-                            ui.set_current_liked(result.liked);
-                            set_status_temp(
-                                &ui,
-                                if result.liked {
-                                    "已添加到我喜欢的音乐".to_string()
-                                } else {
-                                    "已取消喜欢".to_string()
-                                },
-                                Duration::from_millis(2400),
-                            );
+                            // A slow response must not overwrite the state of a
+                            // song the user has switched to in the meantime.
+                            if ui.get_current_id().as_str() == id.as_str() {
+                                ui.set_current_liked(result.liked);
+                                set_status_temp(
+                                    &ui,
+                                    if result.liked {
+                                        "已添加到我喜欢的音乐".to_string()
+                                    } else {
+                                        "已取消喜欢".to_string()
+                                    },
+                                    Duration::from_millis(2400),
+                                );
+                            }
                         });
                     }
                     Err(error) => update_ui(&weak, move |ui| ui.set_status_text(error.into())),
@@ -2841,8 +3857,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if !ui.get_logged_in() {
+                set_status_temp(
+                    &ui,
+                    "登录后才能收藏歌单".to_string(),
+                    Duration::from_millis(2400),
+                );
+                return;
+            }
             let id = ui.get_detail_id().to_string();
             if id.is_empty() {
+                return;
+            }
+            let already_pending = subscribe_inflight()
+                .lock()
+                .map(|mut set| !set.insert(id.clone()))
+                .unwrap_or(false);
+            if already_pending {
                 return;
             }
             let subscribed = ui.get_detail_subscribed();
@@ -2851,20 +3882,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let state = state.clone();
             let weak = weak.clone();
             let catalog = catalog.clone();
+            let epoch = state.session_epoch();
             runtime.spawn(async move {
-                match netease::subscribe_playlist(id, !subscribed).await {
+                let result = netease::subscribe_playlist(id.clone(), !subscribed).await;
+                if let Ok(mut set) = subscribe_inflight().lock() {
+                    set.remove(&id);
+                }
+                if state.session_epoch() != epoch {
+                    return;
+                }
+                match result {
                     Ok(()) => {
                         update_ui(&weak, move |ui| {
-                            ui.set_detail_subscribed(!subscribed);
-                            set_status_temp(
-                                &ui,
-                                if subscribed {
-                                    "已取消收藏歌单".to_string()
-                                } else {
-                                    "已收藏歌单".to_string()
-                                },
-                                Duration::from_millis(2400),
-                            );
+                            if ui.get_detail_id().as_str() == id.as_str() {
+                                ui.set_detail_subscribed(!subscribed);
+                                set_status_temp(
+                                    &ui,
+                                    if subscribed {
+                                        "已取消收藏歌单".to_string()
+                                    } else {
+                                        "已收藏歌单".to_string()
+                                    },
+                                    Duration::from_millis(2400),
+                                );
+                            }
                         });
                         load_library(&task_runtime, state, weak, catalog);
                     }
@@ -2905,6 +3946,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            if !ui.get_logged_in() {
+                set_status_temp(
+                    &ui,
+                    "登录后才能管理歌单".to_string(),
+                    Duration::from_millis(2400),
+                );
+                return;
+            }
             let mode = ui.get_playlist_dialog_mode().to_string();
             let input = text.trim().to_string();
             if input.is_empty() {
@@ -2972,18 +4021,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio = audio.clone();
         let weak = weak.clone();
         let player = player.clone();
+        let generation = generation.clone();
         ui.on_seek(move |value| {
+            let token = generation.load(Ordering::Relaxed);
             let loaded = audio
                 .snapshot
                 .lock()
-                .map(|snapshot| snapshot.loaded)
+                .map(|snapshot| snapshot.loaded && snapshot.token == token)
                 .unwrap_or(false);
             if !loaded {
                 if let Ok(mut player) = player.lock() {
                     player.resume_position = value.max(0.0);
                 }
             }
-            let _ = audio.tx.send(AudioCmd::Seek(value));
+            let _ = audio.tx.send(AudioCmd::Seek { value, token });
             if let Some(ui) = weak.upgrade() {
                 ui.set_progress(value);
                 ui.set_position_text(format_clock(value).into());
@@ -2994,10 +4045,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let audio = audio.clone();
         let weak = weak.clone();
+        let player = player.clone();
+        let generation = generation.clone();
         ui.on_seek_lyric(move |time| {
-            let _ = audio.tx.send(AudioCmd::Seek(time));
+            let token = generation.load(Ordering::Relaxed);
+            let loaded = audio
+                .snapshot
+                .lock()
+                .map(|snapshot| snapshot.loaded && snapshot.token == token)
+                .unwrap_or(false);
+            if !loaded {
+                if let Ok(mut player) = player.lock() {
+                    player.resume_position = time.max(0.0);
+                }
+            }
+            let _ = audio.tx.send(AudioCmd::Seek { value: time, token });
             if let Some(ui) = weak.upgrade() {
                 ui.set_progress(time);
+                ui.set_position_text(format_clock(time).into());
                 ui.set_lyric_follow(true);
             }
         });
@@ -3025,22 +4090,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
+        let runtime = runtime.clone();
+        let state = state.clone();
         let prefs = prefs.clone();
         let weak = weak.clone();
+        let audio = audio.clone();
+        let player = player.clone();
+        let lyrics = lyrics.clone();
+        let generation = generation.clone();
         ui.on_set_quality(move |value| {
             let quality = normalize_quality(value.as_str()).to_string();
             if let Ok(mut prefs) = prefs.lock() {
                 prefs.quality = quality.clone();
                 save_prefs(&prefs);
             }
-            if let Some(ui) = weak.upgrade() {
-                ui.set_quality(quality.clone().into());
-                set_status_temp(
-                    &ui,
-                    format!("播放音质：{}（下一首生效）", quality_label(&quality)),
-                    Duration::from_millis(2400),
-                );
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            ui.set_quality(quality.clone().into());
+            set_status_temp(
+                &ui,
+                format!("播放音质：{}", quality_label(&quality)),
+                Duration::from_millis(2400),
+            );
+            // Apply the new quality to the current track immediately. Keep
+            // the current position and whether the user was playing.
+            let Some(track) = player.lock().ok().and_then(|player| player.current.clone()) else {
+                return;
+            };
+            let token = generation.load(Ordering::Relaxed);
+            let position = audio
+                .snapshot
+                .lock()
+                .ok()
+                .and_then(|snapshot| {
+                    if snapshot.loaded && snapshot.token == token {
+                        Some(snapshot.position)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    player
+                        .lock()
+                        .map(|player| player.resume_position)
+                        .unwrap_or(0.0)
+                });
+            if let Ok(mut player) = player.lock() {
+                player.resume_position = position.max(0.0);
             }
+            start_track(
+                &runtime,
+                state.clone(),
+                weak.clone(),
+                audio.clone(),
+                player.clone(),
+                lyrics.clone(),
+                generation.clone(),
+                prefs.clone(),
+                track,
+                ui.get_playing(),
+            );
         });
     }
 
@@ -3231,6 +4341,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     });
+                    let hide = ui.as_weak();
+                    let hide_anim = player_anim.clone();
+                    Timer::single_shot(Duration::from_millis(240), move || {
+                        if hide_anim.load(Ordering::Relaxed) == request {
+                            if let Some(ui) = hide.upgrade() {
+                                // The cross-fade is 220ms; removing the panel
+                                // now prevents transparent controls from
+                                // intercepting clicks after the fade.
+                                ui.set_player_visible(false);
+                            }
+                        }
+                    });
                     let settle = ui.as_weak();
                     let settle_anim = player_anim.clone();
                     Timer::single_shot(Duration::from_millis(450), move || {
@@ -3259,7 +4381,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let player = player.clone();
         let generation = generation.clone();
         let prefs = prefs.clone();
-        let mut last_media_playing = false;
+        let mut last_audio_error: Option<String> = None;
         let timer = Timer::default();
         timer.start(TimerMode::Repeated, Duration::from_millis(400), move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -3300,47 +4422,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => {}
             }
 
+            let current_token = generation.load(Ordering::Relaxed);
             let snapshot = audio
                 .snapshot
                 .lock()
                 .ok()
                 .map(|state| state.clone())
                 .unwrap_or_default();
-            if snapshot.playing != last_media_playing {
-                last_media_playing = snapshot.playing;
-                media::update_playback(snapshot.playing);
+            // A snapshot from a previous generation must never drive the new
+            // track's UI. `u64::MAX` is the permanent audio-output error.
+            if snapshot.token != current_token && snapshot.token != u64::MAX {
+                return;
             }
-            let duration = ui.get_duration().max(0.01);
-            if snapshot.error.is_some() {
-                if let Some(error) = snapshot.error.clone() {
-                    ui.set_status_text(error.into());
+            set_media_playing(snapshot.playing);
+            if ui.get_window_minimized() {
+                // Keep media keys and auto-advance working while the window is
+                // minimized, but skip the UI/label/lyrics writes that would
+                // fault pages back into the working set.
+                if snapshot.ended {
+                    if let Ok(mut snap) = audio.snapshot.lock() {
+                        snap.ended = false;
+                    }
+                    play_relative(
+                        1,
+                        &runtime,
+                        &state,
+                        &weak,
+                        &audio,
+                        &player,
+                        &lyrics,
+                        &generation,
+                        &prefs,
+                    );
+                }
+                return;
+            }
+            if snapshot.duration > 0.5 {
+                let current = ui.get_duration();
+                if (current - snapshot.duration).abs() > 0.5 {
+                    ui.set_duration(snapshot.duration);
+                    ui.set_duration_text(format_clock(snapshot.duration).into());
                 }
             }
-            ui.set_progress(snapshot.position.min(duration));
-            ui.set_position_text(format_clock(snapshot.position).into());
-            if snapshot.loaded && ui.get_status_text().as_str() == "正在加载音源…" {
-                ui.set_status_text("".into());
+            if let Some(error) = snapshot.error.clone() {
+                if last_audio_error.as_deref() != Some(error.as_str()) {
+                    last_audio_error = Some(error.clone());
+                    ui.set_status_text(error.into());
+                }
+                ui.set_loading(false);
+                ui.set_playing(false);
+                return;
             }
-            if snapshot.loaded || snapshot.error.is_some() {
+            last_audio_error = None;
+            if snapshot.loaded || snapshot.ended {
+                let duration = ui.get_duration().max(0.01);
+                ui.set_progress(snapshot.position.min(duration));
+                ui.set_position_text(format_clock(snapshot.position).into());
+            }
+            if snapshot.loaded {
+                if ui.get_status_text().as_str() == "正在加载音源…" {
+                    ui.set_status_text("".into());
+                }
+                ui.set_loading(false);
+            } else if snapshot.ended {
                 ui.set_loading(false);
             }
             ui.set_playing(snapshot.playing);
-            let lines = lyrics
-                .lock()
-                .ok()
-                .map(|lines| lines.clone())
-                .unwrap_or_default();
-            if !lines.is_empty() {
-                let mut index = 0;
-                for (i, line) in lines.iter().enumerate() {
-                    if line.time as f32 <= snapshot.position {
-                        index = i;
+            if snapshot.loaded || snapshot.ended {
+                let lines = lyrics
+                    .lock()
+                    .ok()
+                    .map(|lines| lines.clone())
+                    .unwrap_or_default();
+                if !lines.is_empty() {
+                    let mut index = 0;
+                    for (i, line) in lines.iter().enumerate() {
+                        if line.time as f32 <= snapshot.position {
+                            index = i;
+                        }
                     }
-                }
-                let previous = ui.get_lyric_index();
-                ui.set_lyric_index(index as i32);
-                if index as i32 != previous && ui.get_lyric_follow() {
-                    ui.set_lyric_scroll_y(ui.get_lyric_target_y());
+                    let previous = ui.get_lyric_index();
+                    ui.set_lyric_index(index as i32);
+                    if index as i32 != previous && ui.get_lyric_follow() {
+                        ui.set_lyric_scroll_y(ui.get_lyric_target_y());
+                    }
                 }
             }
             if snapshot.ended {
@@ -3390,6 +4555,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_status_text("请扫码登录，或导入网页版 Cookie".into());
                         ui.invoke_refresh_qr();
                     });
+                    // Public recommendations are available without login.
+                    load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
                 }
                 Err(error) => {
                     update_ui(&weak, move |ui| {
@@ -3397,20 +4564,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_status_text(error.into());
                         ui.invoke_refresh_qr();
                     });
+                    load_home(&task_runtime, state.clone(), weak.clone(), catalog.clone());
                 }
             }
         });
     }
 
     let result = ui.run();
-    let position = match audio.snapshot.lock() {
-        Ok(snapshot) if snapshot.loaded => snapshot.position,
-        _ => player
-            .lock()
-            .map(|player| player.resume_position)
-            .unwrap_or(0.0),
-    };
+    let position = current_position(&audio, &player, &generation);
     save_player(&player, position);
+    SHUTDOWN_SAVED.store(true, Ordering::Relaxed);
     if let Err(error) = result {
         logger::log(
             "error",

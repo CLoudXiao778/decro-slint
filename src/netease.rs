@@ -44,7 +44,8 @@ pub struct HomeFeed {
     pub new_songs: Vec<TrackDto>,
     pub daily: Vec<TrackDto>,
     pub recent: Vec<TrackDto>,
-    pub user_playlists: Vec<PlaylistDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -65,6 +66,8 @@ pub struct SearchData {
     pub artists: Vec<ArtistInfo>,
     pub albums: Vec<AlbumInfo>,
     pub lyrics: Vec<LyricSearchDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +85,7 @@ impl SearchData {
             artists: Vec::new(),
             albums: Vec::new(),
             lyrics: Vec::new(),
+            error: None,
         }
     }
 }
@@ -155,13 +159,6 @@ pub struct LyricData {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlaybackConfig {
-    pub base: String,
-    pub token: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LikeResult {
     pub liked: bool,
 }
@@ -214,7 +211,19 @@ fn value_string(value: &Value) -> Option<String> {
     }
 }
 
+/// NetEase mixes integer and floating-point numbers (play counts are often
+/// `2.11E7`). Accept both instead of silently turning them into 0.
+fn value_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
+}
+
 fn sized_cover(url: &str) -> String {
+    let url = url.trim();
+    if url.is_empty() {
+        return String::new();
+    }
     let url = https_url(url);
     if url.contains('?') {
         format!("{url}&param=500y500")
@@ -277,8 +286,8 @@ fn normalize_artist(value: &Value) -> Option<ArtistInfo> {
             .unwrap_or("")
             .to_string(),
         aliases,
-        album_count: value.get("albumSize").and_then(Value::as_u64).unwrap_or(0),
-        song_count: value.get("musicSize").and_then(Value::as_u64).unwrap_or(0),
+        album_count: value.get("albumSize").and_then(value_u64).unwrap_or(0),
+        song_count: value.get("musicSize").and_then(value_u64).unwrap_or(0),
     })
 }
 
@@ -317,11 +326,8 @@ fn normalize_album(
             .and_then(Value::as_str)
             .map(sized_cover)
             .unwrap_or_default(),
-        publish_time: value
-            .get("publishTime")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        size: value.get("size").and_then(Value::as_u64).unwrap_or(0),
+        publish_time: value.get("publishTime").and_then(value_u64).unwrap_or(0),
+        size: value.get("size").and_then(value_u64).unwrap_or(0),
         company: value
             .get("company")
             .and_then(Value::as_str)
@@ -400,7 +406,7 @@ pub fn normalize_song(value: &Value) -> Option<TrackDto> {
     let duration_ms = value
         .get("dt")
         .or_else(|| value.get("duration"))
-        .and_then(Value::as_u64)
+        .and_then(value_u64)
         .unwrap_or(0);
     let fee = value.get("fee").and_then(Value::as_i64).unwrap_or(0);
 
@@ -442,9 +448,9 @@ pub fn normalize_playlist(value: &Value) -> Option<PlaylistDto> {
     let tracks = normalize_tracks(value.get("tracks"));
     let track_count = value
         .get("trackCount")
-        .and_then(Value::as_u64)
+        .and_then(value_u64)
         .unwrap_or(tracks.len() as u64);
-    let play_count = value.get("playCount").and_then(Value::as_u64).unwrap_or(0);
+    let play_count = value.get("playCount").and_then(value_u64).unwrap_or(0);
     let cover_url = value
         .get("coverImgUrl")
         .or_else(|| value.get("picUrl"))
@@ -467,7 +473,7 @@ pub fn normalize_playlist(value: &Value) -> Option<PlaylistDto> {
         .get("specialType")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    let update_time = value.get("updateTime").and_then(Value::as_u64).unwrap_or(0);
+    let update_time = value.get("updateTime").and_then(value_u64).unwrap_or(0);
     let subscribed = value
         .get("subscribed")
         .and_then(Value::as_bool)
@@ -616,49 +622,49 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
             .unwrap_or_else(|| "首页加载失败".to_string()));
     }
 
-    let recommended = recommended_json
-        .ok()
-        .map(|value| playlists_from(value.get("result")))
-        .unwrap_or_default();
-    let new_songs = new_songs_json
-        .ok()
-        .and_then(|value| {
-            value.get("result").and_then(Value::as_array).map(|items| {
+    let mut errors = Vec::new();
+    let recommended = match recommended_json {
+        Ok(value) => playlists_from(value.get("result")),
+        Err(error) => {
+            errors.push(format!("推荐歌单：{error}"));
+            Vec::new()
+        }
+    };
+    let new_songs = match new_songs_json {
+        Ok(value) => value
+            .get("result")
+            .and_then(Value::as_array)
+            .map(|items| {
                 items
                     .iter()
                     .map(|item| item.get("song").unwrap_or(item))
                     .filter_map(normalize_song)
                     .collect()
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default(),
+        Err(error) => {
+            errors.push(format!("新歌：{error}"));
+            Vec::new()
+        }
+    };
 
     let mut daily = Vec::new();
     let mut recent = Vec::new();
-    let mut user_playlists = Vec::new();
 
-    if let Some(account) = state.account() {
-        let uid = account.user_id;
+    if state.account().is_some() {
         let daily_query = [("limit", "30".to_string())];
-        let playlists_query = [
-            ("uid", uid),
-            ("limit", "100".to_string()),
-            ("offset", "0".to_string()),
-        ];
-        let (daily_result, recent_result, playlists_result) = tokio::join!(
+        let (daily_result, recent_result) = tokio::join!(
             get_json(state, "/api/v3/discovery/recommend/songs", &daily_query,),
             recent_played(state),
-            get_json(state, "/api/user/playlist", &playlists_query),
         );
 
-        if let Ok(value) = daily_result {
-            daily = parse_daily(&value);
+        match daily_result {
+            Ok(value) => daily = parse_daily(&value),
+            Err(error) => errors.push(format!("每日推荐：{error}")),
         }
-        if let Ok(list) = recent_result {
-            recent = list;
-        }
-        if let Ok(value) = playlists_result {
-            user_playlists = playlists_from(value.get("playlist"));
+        match recent_result {
+            Ok(list) => recent = list,
+            Err(error) => errors.push(format!("最近播放：{error}")),
         }
     }
 
@@ -667,7 +673,11 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
         new_songs,
         daily,
         recent,
-        user_playlists,
+        error: if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("；"))
+        },
     })
 }
 
@@ -930,6 +940,19 @@ pub async fn search_music(state: &AppState, keyword: String) -> Result<SearchDat
         get_json(state, "/api/cloudsearch/pc", &album_query),
     );
 
+    let mut errors = Vec::new();
+    if let Err(error) = &songs_result {
+        errors.push(format!("歌曲：{error}"));
+    }
+    if let Err(error) = &playlists_result {
+        errors.push(format!("歌单：{error}"));
+    }
+    if let Err(error) = &artists_result {
+        errors.push(format!("歌手：{error}"));
+    }
+    if let Err(error) = &albums_result {
+        errors.push(format!("专辑：{error}"));
+    }
     if songs_result.is_err()
         && playlists_result.is_err()
         && artists_result.is_err()
@@ -991,6 +1014,11 @@ pub async fn search_music(state: &AppState, keyword: String) -> Result<SearchDat
         playlists,
         artists,
         albums,
+        error: if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("；"))
+        },
         ..SearchData::empty()
     })
 }
@@ -1119,13 +1147,19 @@ pub async fn search_kind(
 
 fn parse_lrc(text: &str) -> Vec<(f64, String)> {
     let mut lines = Vec::new();
+    let mut offset_ms = 0.0f64;
     for raw in text.lines() {
         let mut rest = raw.trim();
         let mut times = Vec::new();
         while rest.starts_with('[') {
             let Some(end) = rest.find(']') else { break };
             let tag = &rest[1..end];
-            if let Some(time) = parse_lrc_time(tag) {
+            if let Some(value) = tag
+                .strip_prefix("offset:")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+            {
+                offset_ms = value;
+            } else if let Some(time) = parse_lrc_time(tag) {
                 times.push(time);
             }
             rest = &rest[end + 1..];
@@ -1139,6 +1173,12 @@ fn parse_lrc(text: &str) -> Vec<(f64, String)> {
         }
     }
     lines.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let offset = offset_ms / 1000.0;
+    if offset != 0.0 {
+        for line in &mut lines {
+            line.0 = (line.0 + offset).max(0.0);
+        }
+    }
     lines
 }
 
@@ -1216,11 +1256,11 @@ pub async fn report_play_start(
         .map_err(|error| format!("播放上报线程失败: {error}"))?
 }
 
-pub fn playback_config(state: &AppState) -> PlaybackConfig {
-    PlaybackConfig {
-        base: state.proxy.base.clone(),
-        token: state.proxy.token.clone(),
-    }
+#[derive(Clone, Debug)]
+pub struct ResolvedSong {
+    pub url: String,
+    pub level: String,
+    pub trial: bool,
 }
 
 /// Resolve a playable CDN URL through libnetease's weapi/eapi implementation.
@@ -1230,29 +1270,33 @@ pub async fn resolve_song_url(
     state: &AppState,
     id: &str,
     requested_level: Option<&str>,
-) -> Result<String, String> {
+) -> Result<ResolvedSong, String> {
     if id.is_empty() || !id.chars().all(|ch| ch.is_ascii_digit()) {
         return Err("无效的歌曲 ID".to_string());
     }
     let requested_level = requested_level.filter(|level| {
         matches!(
             *level,
-            "standard" | "higher" | "exhigh" | "lossless" | "hires"
+            "auto" | "standard" | "higher" | "exhigh" | "lossless" | "hires"
         )
     });
     let cache_key = format!("{}:{id}", requested_level.unwrap_or("auto"));
 
     if let Ok(cache) = state.url_cache.lock() {
-        if let Some((url, at)) = cache.get(&cache_key) {
+        if let Some((url, level, trial, at)) = cache.get(&cache_key) {
             if at.elapsed() < Duration::from_secs(240) {
-                return Ok(url.clone());
+                return Ok(ResolvedSong {
+                    url: url.clone(),
+                    level: level.clone(),
+                    trial: *trial,
+                });
             }
         }
     }
 
     let id_owned = id.to_string();
     let requested = requested_level.map(str::to_string);
-    let url = tokio::task::spawn_blocking(move || {
+    let resolved = tokio::task::spawn_blocking(move || {
         let mut levels = Vec::new();
         if let Some(level) = requested {
             levels.push(level);
@@ -1265,7 +1309,7 @@ pub async fn resolve_song_url(
         let mut last_error = String::new();
         for level in levels.iter().map(String::as_str) {
             match crate::libnetease::song_url(&id_owned, level) {
-                Ok(url) => return Ok(url),
+                Ok((url, trial)) => return Ok((url, level.to_string(), trial)),
                 Err(error) => {
                     crate::logger::log(
                         "debug",
@@ -1285,6 +1329,7 @@ pub async fn resolve_song_url(
     .await
     .map_err(|e| format!("音源解析线程失败: {e}"))??;
 
+    let (url, level, trial) = resolved;
     let url = url
         .strip_prefix("http://")
         .map(|rest| format!("https://{rest}"))
@@ -1304,7 +1349,7 @@ pub async fn resolve_song_url(
         "debug",
         "song",
         &format!(
-            "id={} url_host={}",
+            "id={} url_host={} level={level} trial={trial}",
             id,
             reqwest::Url::parse(&url)
                 .ok()
@@ -1313,7 +1358,31 @@ pub async fn resolve_song_url(
         ),
     );
     if let Ok(mut cache) = state.url_cache.lock() {
-        cache.insert(cache_key, (url.clone(), Instant::now()));
+        cache.insert(
+            cache_key,
+            (url.clone(), level.clone(), trial, Instant::now()),
+        );
     }
-    Ok(url)
+    Ok(ResolvedSong { url, level, trial })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_lrc;
+
+    #[test]
+    fn lrc_handles_multiple_timestamps() {
+        let lines = parse_lrc("[00:01.00][00:02.50]hello\n[00:03.00]world");
+        assert_eq!(lines.len(), 3);
+        assert!((lines[0].0 - 1.0).abs() < 0.001);
+        assert!((lines[1].0 - 2.5).abs() < 0.001);
+        assert_eq!(lines[2].1, "world");
+    }
+
+    #[test]
+    fn lrc_applies_offset() {
+        let lines = parse_lrc("[offset:500]\n[00:01.00]hello");
+        assert_eq!(lines.len(), 1);
+        assert!((lines[0].0 - 1.5).abs() < 0.001);
+    }
 }

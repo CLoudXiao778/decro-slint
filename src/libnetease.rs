@@ -61,9 +61,7 @@ extern "C" {
     fn ne_set_cookie_file(path: *const c_char);
     fn ne_jar_reload();
     fn ne_jar_import_cookies(cookie_str: *const c_char);
-    fn ne_global_jar() -> *mut c_void;
-    fn ne_jar_cookie_header(jar: *const c_void) -> *mut c_char;
-    fn ne_set_risk_retry(max_attempts: i32);
+    fn ne_global_cookie_header() -> *mut c_char;
 
     fn ne_qr_get_key(
         code_out: *mut f64,
@@ -93,14 +91,8 @@ static TRANSPORT: NeHttpTransport = NeHttpTransport {
 };
 
 static INIT: OnceLock<()> = OnceLock::new();
-static LIB_LOCK: Mutex<()> = Mutex::new(());
+static CRYPTO_LOCK: Mutex<()> = Mutex::new(());
 static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-
-fn lock() -> std::sync::MutexGuard<'static, ()> {
-    LIB_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 fn cstring(value: &str) -> CString {
     CString::new(value).unwrap_or_else(|_| CString::new("").expect("empty CString"))
@@ -121,41 +113,45 @@ pub fn init() {
             ne_set_api_base(cstring("https://music.163.com").as_ptr());
             ne_set_cookie_file(cookie_path().as_ptr());
             ne_http_set_transport(&TRANSPORT);
-            ne_set_risk_retry(2);
+            // Risk-control retries are deliberately left off: the same switch
+            // also retries non-idempotent writes such as playlist creation.
         }
     });
 }
 
 pub fn set_cookies(cookies: &str) {
     init();
-    let _guard = lock();
-    let path = cookie_path();
+    // The C jar has its own lock. Reload + import are both thread-safe and
+    // must not be serialized with in-flight HTTP requests by the Rust layer.
     let raw = cstring(cookies);
     unsafe {
-        ne_set_cookie_file(path.as_ptr());
         ne_jar_reload();
+        ne_jar_import_cookies(raw.as_ptr());
+    }
+}
+
+/// Merge a cookie string into the live jar without clearing it first. Used for
+/// the QR 803 response, whose `cookie` field is not always mirrored in
+/// Set-Cookie headers.
+pub fn merge_cookies(cookies: &str) {
+    init();
+    let raw = cstring(cookies);
+    unsafe {
         ne_jar_import_cookies(raw.as_ptr());
     }
 }
 
 pub fn clear_cookies() {
     init();
-    let _guard = lock();
     unsafe {
-        ne_set_cookie_file(cookie_path().as_ptr());
         ne_jar_reload();
     }
 }
 
 pub fn cookie_header() -> String {
     init();
-    let _guard = lock();
     unsafe {
-        let jar = ne_global_jar();
-        if jar.is_null() {
-            return String::new();
-        }
-        let ptr = ne_jar_cookie_header(jar);
+        let ptr = ne_global_cookie_header();
         take_c_string(ptr)
     }
 }
@@ -298,7 +294,11 @@ pub fn report_play_start(id: &str, source_id: &str) -> Result<(), String> {
     }
 
     let params = {
-        let _guard = lock();
+        // The C eapi/JMap helpers are not documented as thread-safe; the
+        // encryption section is short and does not perform network I/O.
+        let _guard = CRYPTO_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             let data = jmap_new();
             if data.is_null() {
@@ -360,7 +360,6 @@ pub fn report_play_start(id: &str, source_id: &str) -> Result<(), String> {
 
 pub fn qr_start() -> Result<(String, String), String> {
     init();
-    let _guard = lock();
     unsafe {
         let mut code = 0.0f64;
         let mut body_ptr = ptr::null_mut();
@@ -391,7 +390,6 @@ pub fn qr_start() -> Result<(String, String), String> {
 
 pub fn qr_check(unikey: &str) -> Result<(i32, String), String> {
     init();
-    let _guard = lock();
     unsafe {
         let mut code = 0.0f64;
         let mut body_len = 0usize;
@@ -435,7 +433,6 @@ fn response_json(resp: *mut NeResp, target: &str) -> Result<Value, String> {
 
 pub fn playlist_subscribe(id: &str, subscribe: bool) -> Result<(), String> {
     init();
-    let _guard = lock();
     let resp = unsafe {
         ne_playlist_subscribe(
             cstring(id).as_ptr(),
@@ -453,7 +450,6 @@ pub fn playlist_subscribe(id: &str, subscribe: bool) -> Result<(), String> {
 
 pub fn playlist_create(name: &str) -> Result<String, String> {
     init();
-    let _guard = lock();
     let resp = unsafe { ne_playlist_create(cstring(name).as_ptr(), cstring("0").as_ptr()) };
     let json = response_json(resp, "新建歌单")?;
     let id = json
@@ -471,16 +467,14 @@ pub fn playlist_create(name: &str) -> Result<String, String> {
 
 pub fn album_detail(id: &str) -> Result<Value, String> {
     init();
-    let _guard = lock();
     let resp = unsafe { ne_album_detail(cstring(id).as_ptr()) };
     let json = response_json(resp, "专辑详情")?;
     crate::logger::log("debug", "album", &format!("id={id} detail loaded"));
     Ok(json)
 }
 
-pub fn song_url(id: &str, level: &str) -> Result<String, String> {
+pub fn song_url(id: &str, level: &str) -> Result<(String, bool), String> {
     init();
-    let _guard = lock();
     unsafe {
         let resp = ne_song_url_v1(cstring(id).as_ptr(), cstring(level).as_ptr());
         let (code, err, body) = take_resp(resp)?;
@@ -491,24 +485,31 @@ pub fn song_url(id: &str, level: &str) -> Result<String, String> {
         );
         let json: Value =
             serde_json::from_str(&body).map_err(|e| format!("音源响应格式异常: {e}"))?;
+        let trial = json
+            .pointer("/data/0/freeTrialInfo")
+            .is_some_and(|value| !value.is_null());
         if let Some(url) = json
             .pointer("/data/0/url")
             .and_then(Value::as_str)
             .filter(|url| !url.is_empty())
         {
-            return Ok(url.to_string());
+            // A trial URL is still playable, but the caller must know so it
+            // can show "试听" instead of the requested quality.
+            return Ok((url.to_string(), trial));
         }
-        if let Some(trial) = json.pointer("/data/0/freeTrialInfo") {
-            if !trial.is_null() {
-                return Err("该歌曲仅提供试听片段（需要会员）".to_string());
-            }
+        if trial {
+            return Err("该歌曲仅提供试听片段（需要会员）".to_string());
         }
+        let inner_code = json
+            .pointer("/data/0/code")
+            .and_then(Value::as_i64)
+            .unwrap_or(code);
         let message = json
             .pointer("/data/0/message")
             .and_then(Value::as_str)
             .filter(|message| !message.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| format!("该歌曲暂不可播放（code={code}）"));
+            .unwrap_or_else(|| format!("该歌曲暂不可播放（code={inner_code}）"));
         if !err.is_empty() {
             Err(err)
         } else {
@@ -519,7 +520,6 @@ pub fn song_url(id: &str, level: &str) -> Result<String, String> {
 
 pub fn song_like(id: &str, like: bool) -> Result<(), String> {
     init();
-    let _guard = lock();
     unsafe {
         let resp = ne_song_like(
             cstring(id).as_ptr(),

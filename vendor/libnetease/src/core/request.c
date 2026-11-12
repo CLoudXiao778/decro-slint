@@ -181,6 +181,10 @@ static char *jar_cookie_header_alloc(void) {
     return h;
 }
 
+/* Thread-safe export used by embedded hosts. Unlike ne_global_jar(), the
+ * returned header is a private copy produced under the jar lock. */
+char *ne_global_cookie_header(void) { return jar_cookie_header_alloc(); }
+
 /* Merge Set-Cookie lines delivered by the transport directly from the
  * response object — no thread-local back-channel (see the thread contract
  * note in request.h).

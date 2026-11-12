@@ -33,6 +33,14 @@ pub fn update_playback(playing: bool) {
     imp::update_playback(playing);
 }
 
+pub fn update_position(position: f32, duration: f32) {
+    imp::update_position(position, duration);
+}
+
+pub fn clear() {
+    imp::clear();
+}
+
 pub fn take_command() -> Option<MediaCommand> {
     match COMMAND.swap(0, Ordering::Relaxed) {
         CMD_TOGGLE => Some(MediaCommand::Toggle),
@@ -49,6 +57,8 @@ mod imp {
     pub fn start() {}
     pub fn update_track(_: &str, _: &str, _: &str, _: Option<&Path>) {}
     pub fn update_playback(_: bool) {}
+    pub fn update_position(_: f32, _: f32) {}
+    pub fn clear() {}
 }
 
 #[cfg(windows)]
@@ -60,11 +70,12 @@ mod imp {
 
     use windows::core::Interface;
     use windows::core::{w, HSTRING, PCWSTR};
+    use windows::Foundation::TimeSpan;
     use windows::Foundation::TypedEventHandler;
     use windows::Media::{
         MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
         SystemMediaTransportControlsButtonPressedEventArgs,
-        SystemMediaTransportControlsDisplayUpdater,
+        SystemMediaTransportControlsDisplayUpdater, SystemMediaTransportControlsTimelineProperties,
     };
     use windows::Storage::StorageFile;
     use windows::Storage::Streams::{IRandomAccessStream, RandomAccessStreamReference};
@@ -83,6 +94,11 @@ mod imp {
             cover: Option<PathBuf>,
         },
         Playback(bool),
+        Position {
+            position: f32,
+            duration: f32,
+        },
+        Clear,
     }
 
     static TX: OnceLock<Mutex<Sender<MediaUpdate>>> = OnceLock::new();
@@ -116,6 +132,22 @@ mod imp {
         if let Some(tx) = TX.get() {
             if let Ok(tx) = tx.lock() {
                 let _ = tx.send(MediaUpdate::Playback(playing));
+            }
+        }
+    }
+
+    pub fn update_position(position: f32, duration: f32) {
+        if let Some(tx) = TX.get() {
+            if let Ok(tx) = tx.lock() {
+                let _ = tx.send(MediaUpdate::Position { position, duration });
+            }
+        }
+    }
+
+    pub fn clear() {
+        if let Some(tx) = TX.get() {
+            if let Ok(tx) = tx.lock() {
+                let _ = tx.send(MediaUpdate::Clear);
             }
         }
     }
@@ -203,6 +235,12 @@ mod imp {
                     cover,
                 } => {
                     if let Some(updater) = &updater {
+                        if cover.is_none() {
+                            // Do not leave the previous track's artwork on the
+                            // system flyout when the new track has no cover.
+                            let _ = updater.ClearAll();
+                            let _ = updater.SetType(MediaPlaybackType::Music);
+                        }
                         if let Ok(properties) = updater.MusicProperties() {
                             let _ = properties.SetTitle(&HSTRING::from(title.as_str()));
                             let _ = properties.SetArtist(&HSTRING::from(artist.as_str()));
@@ -221,6 +259,28 @@ mod imp {
                         MediaPlaybackStatus::Paused
                     };
                     let _ = smtc.SetPlaybackStatus(status);
+                }
+                MediaUpdate::Position { position, duration } => {
+                    if duration > 0.0 {
+                        if let Ok(timeline) = SystemMediaTransportControlsTimelineProperties::new()
+                        {
+                            let to_ticks = |seconds: f32| TimeSpan {
+                                Duration: (seconds.max(0.0) as f64 * 10_000_000.0) as i64,
+                            };
+                            let _ = timeline.SetStartTime(to_ticks(0.0));
+                            let _ = timeline.SetEndTime(to_ticks(duration));
+                            let _ = timeline.SetMinSeekTime(to_ticks(0.0));
+                            let _ = timeline.SetMaxSeekTime(to_ticks(duration));
+                            let _ = timeline.SetPosition(to_ticks(position.min(duration)));
+                            let _ = smtc.UpdateTimelineProperties(&timeline);
+                        }
+                    }
+                }
+                MediaUpdate::Clear => {
+                    if let Some(updater) = &updater {
+                        let _ = updater.ClearAll();
+                    }
+                    let _ = smtc.SetPlaybackStatus(MediaPlaybackStatus::Closed);
                 }
             }
         }
