@@ -4,12 +4,11 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：`0.4.0`（commit `e96808e`，已发布预发布版 `v0.4.0-slint`）
-- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.0-slint`
-  - 资产：`Decro.Slint_0.4.0_portable_x64.zip`
-  - SHA256：`67b99dcf86d7fb54ddb7312f9cb00fb94cb5d0794242f18f270e1edd0d59541d`
-  - 预发布；浅色主题/任务栏按钮/进度/SMTC seek/随机播放/剪贴板/单曲音质重载仍需 Windows 真机验证
-- 未发布改动（攒到下一版一起发布）：`df0d70d` 修复 Slint 1.18.1 软件渲染器多段渐变色标边界的 1px 横线（播放页/歌单/歌手详情/首页大卡片）；`b24a89f` 播放页歌手/专辑名可点击跳转对应详情页；`7f8c40e` 进度条固定在控制栏上方，播放页/歌词页位置一致；`6906d1a` 默认启用 OpenGL femtovg 硬件渲染，软件渲染自动回退；`58b375b` dock 进度条改为从左向右填充；`4d39a01` 修复最小化切歌后 SMTC 播放暂停失灵
+- 当前版本：`0.4.1`（commit `57cf5cc`，已发布预发布版 `v0.4.1-slint`）
+- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.1-slint`
+  - 资产：`Decro.Slint_0.4.1_portable_x64.zip`
+  - SHA256：`9b57575bd1025c97c0bfd5cf5c0ae6628b78feeedc82a3818eebd1437dcb1943`
+  - 预发布；GPU 渲染启用情况、进度条位置、黑线、歌手/专辑跳转、最小化 SMTC 仍需 Windows 真机验证
 - 定位：Tauri 版 Decro 的原生 Slint 重写，Windows x64 便携版。当前开始作为正式项目开发，不再是方案验证。
 - Tauri 参考仓库：`/home/cloud/code/neteaseM3PC`（只读参考；本对话后续专注修 Slint，不要再把两者混在一起改）。
 
