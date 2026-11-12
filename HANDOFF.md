@@ -58,6 +58,8 @@
 - push `vX.Y.Z-slint` tag：同样先格式检查、测试、构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 prerelease，资产附带 `sha256.txt`，release notes 从 `CHANGELOG.md` 对应版本段生成。
 - 发版步骤：同步 `Cargo.toml`、`ui/app.slint` footer、`CHANGELOG.md` → push `main` → 推送版本 tag。
 - Actions 使用 Windows MSVC + 静态 CRT，产物 `Decro.Slint_<version>_portable_x64.zip`。
+- Git 凭据由 OpenChamber 官方集成提供：`credential.https://github.com.helper = !/home/cloud/.config/openchamber/bin/git-credential-openchamber`；不再使用 `/tmp/opencode/bin/gh`，该二进制已删除。
+- GitHub API/PR/Issue 优先走 OpenChamber 的 GitHub 集成（`github-auth.json` + `/api/source-control/github/*`）；发布由 Actions 完成，无 release API 也不需要 gh。
 
 ## 当前待办/风险
 

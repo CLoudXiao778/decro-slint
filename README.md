@@ -56,6 +56,7 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
    ```
 3. Actions 会再次运行格式检查、测试和 release 构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 GitHub prerelease，并附带 zip 与 SHA256。
 4. Windows 构建静态链接 CRT，不需要安装 VC++ 运行库；不要在本地执行 release 构建或 `gh release create`。
+5. Git 凭据使用 OpenChamber 的 `git-credential-openchamber`（GitHub OAuth），不再使用独立安装的 `gh` CLI；GitHub 操作优先使用 OpenChamber 的 GitHub 集成。
 
 ## 已知限制
 
