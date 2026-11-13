@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::rc::Rc;
 
@@ -111,6 +111,7 @@ fn spawn_audio() -> AudioHandle {
     let snap = snapshot.clone();
     std::thread::spawn(move || {
         let fail = |message: &str| {
+            memory::set_audio_active(false);
             if let Ok(mut state) = snap.lock() {
                 state.error = Some(message.to_string());
                 // A permanent output failure is not tied to a track request;
@@ -135,6 +136,10 @@ fn spawn_audio() -> AudioHandle {
         let mut decoded_duration: Option<f32> = None;
         let mut current_path: Option<PathBuf> = None;
         let mut pending_seek: Option<(u64, f32)> = None;
+        // Baseline for detecting audio dropouts: wall-clock time and sink
+        // position. A 0.2 s underrun shows up as the position advancing less
+        // than the elapsed wall time.
+        let mut probe: Option<(Instant, f32)> = None;
         loop {
             match rx.recv_timeout(Duration::from_millis(120)) {
                 Ok(AudioCmd::Load {
@@ -151,6 +156,7 @@ fn spawn_audio() -> AudioHandle {
                     sink.stop();
                     loaded = false;
                     decoded_duration = None;
+                    probe = None;
                     if let Some(old) = current_path.take() {
                         let _ = fs::remove_file(old);
                     }
@@ -248,6 +254,7 @@ fn spawn_audio() -> AudioHandle {
                         } else {
                             sink.pause();
                         }
+                        probe = None;
                     }
                 }
                 Ok(AudioCmd::Volume(value)) => sink.set_volume(value),
@@ -259,6 +266,7 @@ fn spawn_audio() -> AudioHandle {
                         let target = value.clamp(0.0, ceiling);
                         let _ = sink.try_seek(Duration::from_secs_f32(target));
                         pending_seek = None;
+                        probe = None;
                     } else if token >= last_token {
                         // The new track is still being resolved/downloaded;
                         // apply the seek as soon as its Load arrives.
@@ -275,6 +283,7 @@ fn spawn_audio() -> AudioHandle {
                     current_token = 0;
                     decoded_duration = None;
                     pending_seek = None;
+                    probe = None;
                     if let Some(path) = current_path.take() {
                         let _ = fs::remove_file(path);
                     }
@@ -293,12 +302,41 @@ fn spawn_audio() -> AudioHandle {
                     if let Some(path) = current_path.take() {
                         let _ = fs::remove_file(path);
                     }
+                    memory::set_audio_active(false);
                     break;
                 }
             }
+            let now = Instant::now();
             let position = sink.get_pos().as_secs_f32();
             let playing = loaded && !sink.empty() && !sink.is_paused();
             let ended = loaded && sink.empty();
+            memory::set_audio_active(playing);
+            if playing {
+                match probe {
+                    Some((at, at_position)) if now.duration_since(at) >= Duration::from_secs(2) => {
+                        let wall = now.duration_since(at).as_secs_f32();
+                        let advance = position - at_position;
+                        if advance + 0.25 < wall {
+                            logger::log(
+                                "warn",
+                                "audio",
+                                &format!(
+                                    "playback gap {:.0}ms: advanced {:.2}s over {:.2}s wall, position {:.2}s",
+                                    (wall - advance).max(0.0) * 1000.0,
+                                    advance.max(0.0),
+                                    wall,
+                                    position
+                                ),
+                            );
+                        }
+                        probe = Some((now, position));
+                    }
+                    None => probe = Some((now, position)),
+                    _ => {}
+                }
+            } else {
+                probe = None;
+            }
             if ended {
                 loaded = false;
             }
