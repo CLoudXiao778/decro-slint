@@ -4,11 +4,11 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：`0.4.2`（commit `6f0501a`，最新发布 `v0.4.2-slint`）
-- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.2-slint`
+- 当前版本：`0.4.5`（main 已通过 CI；尚未打 tag/release）
+- 最新发布：仍是 `v0.4.2-slint`：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.2-slint`
   - 资产：`Decro.Slint_0.4.2_portable_x64.zip`
   - SHA256：`fa081e0cb62d3c635e72fabd9aaca4d63d3ffcd05641d5acc1bf22d0d665bee8`
-  - 预发布；专辑/歌手内联布局、悬停下划线、多歌手分别跳转、dock 进度恢复仍需 Windows 真机验证
+  - 0.4.5 是播放卡顿修复的待验证构建，确认后再发预发布
 - 0.4.3 / 0.4.4 的雷达歌单改动和对应 release/tag 已作为误判删除，不再保留
 - 定位：Tauri 版 Decro 的原生 Slint 重写，Windows x64 便携版。当前开始作为正式项目开发，不再是方案验证。
 - Tauri 参考仓库：`/home/cloud/code/neteaseM3PC`（只读参考；本对话后续专注修 Slint，不要再把两者混在一起改）。
@@ -21,7 +21,7 @@
 - 中文界面；UI 按 Tauri 截图/CSS 重绘，不另起炉灶。0.4.0 起支持浅色/深色主题，播放页保持深色。
 - 渲染限制：没有 WebView 式实时 `backdrop-filter`；封面模糊是 `image` crate 预生成的真实模糊图。
 
-## 已实现能力（0.4.2）
+## 已实现能力（0.4.5）
 
 - 网易云扫码登录、Cookie 导入、登录态恢复（DPAPI）。
 - 首页/推荐/资料库/搜索/歌单详情/最近播放/每日推荐。
@@ -37,7 +37,7 @@
 - 任务栏缩略图按钮（上一首/播放暂停/下一首）与任务栏播放进度。
 - 播放页专辑/多歌手内联链接、悬停下划线；多歌手分别打开详情，更多菜单按歌手列出。
 - 关闭修复：X/Alt+F4 退出事件循环并结束进程（2 秒强制退出兜底）。
-- 内存日志与最小化工作集回收（`target=memory`）。
+- 内存日志与最小化工作集回收（`target=memory`）；播放期间跳过 `EmptyWorkingSet`，避免解码页被换出造成音频停顿。
 - 性能优化：OpenGL 硬件渲染、环境光预渲染、播放页背景去 1.16x 过采样、播放页展开后隐藏背后工作区。
 
 ## 代码地图
@@ -64,7 +64,8 @@
 
 ## 当前待办/风险
 
-- **0.4.2 为最新版本**：雷达歌单特化已删除，恢复普通推荐歌单逻辑；0.4.3/0.4.4 release 与 tag 已删除。
+- **最新发布仍是 0.4.2**：0.4.3/0.4.4 的雷达歌单改动和 release/tag 已作为误判删除。
+- **0.4.5 待 Windows 真机验证**：用户日志里频繁出现播放中 `minimize-after working=0.2MB`；0.4.5 在播放期间跳过工作集裁剪，并新增 `target=audio playback gap` 日志。若仍有 0.2s 停顿，先看新日志是否记录 gap，再排查音频输出/驱动。播放时最小化内存不会再降到 0.2MB，这是有意的取舍。
 - **Windows 11 任务栏**：如果系统不显示传统缩略图工具栏，任务栏上一首/播放暂停/下一首按钮不可见；进度条仍可用。Explorer 重启后按钮可能消失，当前未监听 `TaskbarButtonCreated` 重新添加。
 - **性能**：已切换 OpenGL femtovg；若仍卡顿，先确认任务管理器 GPU 占用非 0，再排查长列表（资料库/最近播放/详情/搜索）虚拟化。
 - **功能差距**：应用级快捷键/命令面板、窗口大小位置持久化、单实例唤回、桌面歌词/托盘。
@@ -73,7 +74,7 @@
 
 ## 新会话建议顺序
 
-1. `git pull`，确认 0.4.2 真机验证结果。
+1. `git pull`，确认 0.4.5 真机验证结果（重点：播放中最小化/恢复是否还卡 0.2s，日志里是否出现 `playback gap`）。
 2. 性能：先确认 OpenGL 是否启用，再定位具体卡顿页面。
 3. 发版必须走 GitHub Actions tag 流程，不要本地构建或手动上传。
 4. 每次改动保持：默认 OpenGL + 软件回退、便携数据目录、内存目标、中文 UI、Tauri 视觉参考。
