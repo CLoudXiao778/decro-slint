@@ -41,7 +41,6 @@ pub struct PlaylistDto {
 #[serde(rename_all = "camelCase")]
 pub struct HomeFeed {
     pub recommended: Vec<PlaylistDto>,
-    pub radar: Vec<PlaylistDto>,
     pub new_songs: Vec<TrackDto>,
     pub daily: Vec<TrackDto>,
     pub recent: Vec<TrackDto>,
@@ -609,91 +608,12 @@ pub async fn recent_played(state: &AppState) -> Result<Vec<TrackDto>, String> {
     Ok(list)
 }
 
-fn parse_radar_playlists(value: &Value) -> Vec<PlaylistDto> {
-    let Some(blocks) = value.pointer("/data/blocks").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut result = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for block in blocks {
-        let is_radar = block
-            .get("blockCode")
-            .and_then(Value::as_str)
-            .is_some_and(|code| code.contains("MGC_PLAYLIST"));
-        if !is_radar {
-            continue;
-        }
-        let Some(creatives) = block.get("creatives").and_then(Value::as_array) else {
-            continue;
-        };
-        for creative in creatives {
-            let Some(id) = creative
-                .get("creativeId")
-                .or_else(|| creative.get("creative_id"))
-                .and_then(value_string)
-            else {
-                continue;
-            };
-            let ui = creative
-                .get("uiElement")
-                .or_else(|| creative.get("ui_element"));
-            let name = ui
-                .and_then(|ui| ui.pointer("/mainTitle/title"))
-                .and_then(Value::as_str)
-                .or_else(|| creative.get("title").and_then(Value::as_str))
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if name.is_empty() || !seen.insert(id.clone()) {
-                continue;
-            }
-            let cover_url = ui
-                .and_then(|ui| ui.pointer("/image/imageUrl"))
-                .and_then(Value::as_str)
-                .or_else(|| creative.get("imageUrl").and_then(Value::as_str))
-                .map(sized_cover)
-                .unwrap_or_default();
-            result.push(PlaylistDto {
-                id,
-                name,
-                cover_url,
-                track_count: 0,
-                play_count: 0,
-                description: String::new(),
-                creator: "网易云音乐".to_string(),
-                special_type: 0,
-                update_time: 0,
-                subscribed: false,
-                tracks: Vec::new(),
-            });
-        }
-    }
-    result
-}
-
-/// Radar cards live in the mobile homepage block stream. Failure is
-/// non-fatal: the generic personalized playlists still populate the home page.
-pub async fn radar_playlists(state: &AppState) -> Result<Vec<PlaylistDto>, String> {
-    let _ = state;
-    let value = tokio::task::spawn_blocking(crate::libnetease::homepage_radar)
-        .await
-        .map_err(|error| format!("雷达歌单线程失败: {error}"))??;
-    let playlists = parse_radar_playlists(&value);
-    crate::logger::log(
-        "debug",
-        "home",
-        &format!("radar playlists={}", playlists.len()),
-    );
-    Ok(playlists)
-}
-
 pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
     let recommended_query = [("limit", "12".to_string())];
     let new_songs_query = [("limit", "12".to_string())];
-    let (recommended_json, new_songs_json, radar_result) = tokio::join!(
+    let (recommended_json, new_songs_json) = tokio::join!(
         get_json(state, "/api/personalized/playlist", &recommended_query),
         get_json(state, "/api/personalized/newsong", &new_songs_query),
-        tokio::time::timeout(Duration::from_secs(10), radar_playlists(state)),
     );
     if recommended_json.is_err() && new_songs_json.is_err() {
         return Err(recommended_json
@@ -703,17 +623,6 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
     }
 
     let mut errors = Vec::new();
-    let radar = match radar_result {
-        Ok(Ok(playlists)) => playlists,
-        Ok(Err(error)) => {
-            crate::logger::log("warn", "home", &format!("radar failed: {error}"));
-            Vec::new()
-        }
-        Err(_) => {
-            crate::logger::log("warn", "home", "radar timed out");
-            Vec::new()
-        }
-    };
     let recommended = match recommended_json {
         Ok(value) => playlists_from(value.get("result")),
         Err(error) => {
@@ -761,7 +670,6 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
 
     Ok(HomeFeed {
         recommended,
-        radar,
         new_songs,
         daily,
         recent,
@@ -1460,7 +1368,7 @@ pub async fn resolve_song_url(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_lrc, parse_radar_playlists};
+    use super::parse_lrc;
 
     #[test]
     fn lrc_handles_multiple_timestamps() {
@@ -1476,41 +1384,5 @@ mod tests {
         let lines = parse_lrc("[offset:500]\n[00:01.00]hello");
         assert_eq!(lines.len(), 1);
         assert!((lines[0].0 - 1.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn radar_block_parses_playlists() {
-        let value = serde_json::json!({
-            "data": {
-                "blocks": [{
-                    "blockCode": "HOMEPAGE_BLOCK_MGC_PLAYLIST",
-                    "creatives": [
-                        {
-                            "creativeId": 12345,
-                            "uiElement": {
-                                "mainTitle": {"title": "私人雷达"},
-                                "image": {"imageUrl": "http://p1.music.126.net/a.jpg"}
-                            }
-                        },
-                        {
-                            "creativeId": "67890",
-                            "uiElement": {
-                                "mainTitle": {"title": "新歌雷达"},
-                                "image": {"imageUrl": "https://p1.music.126.net/b.jpg"}
-                            }
-                        }
-                    ]
-                }, {
-                    "blockCode": "HOMEPAGE_BLOCK_OTHER",
-                    "creatives": [{"creativeId": 1}]
-                }]
-            }
-        });
-        let playlists = parse_radar_playlists(&value);
-        assert_eq!(playlists.len(), 2);
-        assert_eq!(playlists[0].id, "12345");
-        assert_eq!(playlists[0].name, "私人雷达");
-        assert!(playlists[0].cover_url.starts_with("https://"));
-        assert_eq!(playlists[1].id, "67890");
     }
 }

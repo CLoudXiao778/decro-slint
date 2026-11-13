@@ -4,11 +4,11 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：`0.4.3`（commit `81fc72b`，已由 GitHub Actions 自动发布预发布版 `v0.4.3-slint`）
-- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.3-slint`
-  - 资产：`Decro.Slint_0.4.3_portable_x64.zip`
-  - SHA256：`c6a403c50bc4370e03365691033cd3e022b863d7836d5d1ffe04b2b15897569c`
-  - 预发布；官方雷达歌单、首页回退、专辑/歌手链接仍需 Windows 真机验证
+- 当前版本：`0.4.2`（commit `6f0501a`，已发布预发布版 `v0.4.2-slint`）
+- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.2-slint`
+  - 资产：`Decro.Slint_0.4.2_portable_x64.zip`
+  - SHA256：`fa081e0cb62d3c635e72fabd9aaca4d63d3ffcd05641d5acc1bf22d0d665bee8`
+  - 预发布；专辑/歌手内联布局、悬停下划线、多歌手分别跳转、dock 进度恢复仍需 Windows 真机验证
 - 定位：Tauri 版 Decro 的原生 Slint 重写，Windows x64 便携版。当前开始作为正式项目开发，不再是方案验证。
 - Tauri 参考仓库：`/home/cloud/code/neteaseM3PC`（只读参考；本对话后续专注修 Slint，不要再把两者混在一起改）。
 
@@ -20,7 +20,7 @@
 - 中文界面；UI 按 Tauri 截图/CSS 重绘，不另起炉灶。0.4.0 起支持浅色/深色主题，播放页保持深色。
 - 渲染限制：没有 WebView 式实时 `backdrop-filter`；封面模糊是 `image` crate 预生成的真实模糊图。
 
-## 已实现能力（0.4.3）
+## 已实现能力（0.4.2）
 
 - 网易云扫码登录、Cookie 导入、登录态恢复（DPAPI）。
 - 首页/推荐/资料库/搜索/歌单详情/最近播放/每日推荐。
@@ -63,7 +63,7 @@
 
 ## 当前待办/风险
 
-- **0.4.3 已自动发布**：首页大卡片和“雷达歌单”区使用官方 homepage block 雷达；普通推荐里的静态“欧美私人雷达”不再作为“为你推荐”大卡片。需真机确认雷达卡片加载和每日更新；雷达接口失败时会回退静态推荐。
+- **0.4.2 已发布**：GPU OpenGL 渲染、专辑/多歌手内联链接与悬停下划线、dock 进度恢复修复等已进入 `v0.4.2-slint`；需真机确认 GPU 是否实际启用、链接跳转/下划线、最小化恢复后的 dock 进度。
 - **Windows 11 任务栏**：如果系统不显示传统缩略图工具栏，任务栏上一首/播放暂停/下一首按钮不可见；进度条仍可用。Explorer 重启后按钮可能消失，当前未监听 `TaskbarButtonCreated` 重新添加。
 - **性能**：已切换 OpenGL femtovg；若仍卡顿，先确认任务管理器 GPU 占用非 0，再排查长列表（资料库/最近播放/详情/搜索）虚拟化。
 - **功能差距**：应用级快捷键/命令面板、窗口大小位置持久化、单实例唤回、桌面歌词/托盘。
