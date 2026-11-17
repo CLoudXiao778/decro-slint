@@ -1,4 +1,10 @@
 fn main() {
+    // Iteration builds use <version>+<short hash> so a test build can be
+    // identified without bumping the project version for every change.
+    println!("cargo:rustc-env=DECRO_GIT_HASH={}", git_short_hash());
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+
     let sources = [
         "c_shim.c",
         "vendor/libnetease/src/vendor/base64.c",
@@ -41,6 +47,23 @@ fn main() {
 
     slint_build::compile("ui/app.slint").expect("failed to compile Slint UI");
     embed_windows_icon();
+}
+
+fn git_short_hash() -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if hash.is_empty() {
+                "unknown".to_string()
+            } else {
+                hash
+            }
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 #[cfg(windows)]

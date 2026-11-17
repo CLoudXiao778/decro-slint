@@ -47,16 +47,26 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
 
 正式构建和发布只通过 GitHub Actions 完成，不在本地构建或手动上传 Release。
 
-1. 更新 `Cargo.toml` 版本、`ui/app.slint` 设置页 footer 和 `CHANGELOG.md`，提交并推送 `main`。
-   - push `main` 会自动运行 `cargo fmt --check`、`cargo test`、release 构建并上传 Actions artifact，但不会发布。
-2. 推送与版本一致的 tag，例如 `v0.4.5-slint`：
+### 迭代构建（不提升版本号）
+
+- push `main` 自动运行 `cargo fmt --check`、`cargo test`、Windows release 构建并上传 Actions artifact，但不会发布。
+- 设置页 footer 显示 `基础版本+提交短hash`，例如 `0.4.2+18df9b6`。
+- 产物名为 `Decro.Slint_0.4.2-<hash>_portable_x64.zip`，用 hash 区分每次提交。
+- 常规功能和修复不修改 `Cargo.toml` 版本，只有积累到值得发布时才提升版本号。
+
+### 正式发布
+
+1. 把 `CHANGELOG.md` 的 `Unreleased` 段改为新版本号，并更新 `Cargo.toml` 版本。
+2. 提交并推送 `main`，确认 Actions 的格式检查、测试和构建通过。
+3. 推送与版本一致的 tag，例如 `v0.5.0-slint`：
    ```bash
-   git tag v0.4.5-slint
-   git push origin v0.4.5-slint
+   git tag v0.5.0-slint
+   git push origin v0.5.0-slint
    ```
-3. Actions 会再次运行格式检查、测试和 release 构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 GitHub prerelease，并附带 zip 与 SHA256。
-4. Windows 构建静态链接 CRT，不需要安装 VC++ 运行库；不要在本地执行 release 构建或 `gh release create`。
-5. Git 凭据使用 OpenChamber 的 `git-credential-openchamber`（GitHub OAuth），不再使用独立安装的 `gh` CLI；GitHub 操作优先使用 OpenChamber 的 GitHub 集成。
+4. Actions 会再次运行格式检查、测试和 release 构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 GitHub prerelease。
+5. 发布资产使用干净的 `Decro.Slint_<version>_portable_x64.zip`，并附带 SHA256。
+6. Windows 构建静态链接 CRT，不需要安装 VC++ 运行库；不要在本地执行 release 构建或 `gh release create`。
+7. Git 凭据使用 OpenChamber 的 `git-credential-openchamber`（GitHub OAuth），不再使用独立安装的 `gh` CLI；GitHub 操作优先使用 OpenChamber 的 GitHub 集成。
 
 ## 已知限制
 

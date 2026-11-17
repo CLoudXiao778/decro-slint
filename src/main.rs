@@ -31,6 +31,11 @@ use tokio::task::JoinSet;
 
 slint::include_modules!();
 
+/// Shown in the settings footer, e.g. `0.4.2+18df9b6`. The base version only
+/// changes when a release is actually prepared; iteration builds stay
+/// distinguishable through the short git hash.
+const BUILD_LABEL: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("DECRO_GIT_HASH"));
+
 #[derive(Default, Clone)]
 struct Catalog {
     recent: Vec<netease::TrackDto>,
@@ -2250,6 +2255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let ui = AppWindow::new()?;
+    ui.set_build_label(BUILD_LABEL.into());
     watch_window_restore();
     media::start();
     let weak = ui.as_weak();

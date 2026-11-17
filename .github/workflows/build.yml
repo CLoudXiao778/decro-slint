@@ -33,16 +33,20 @@ jobs:
         shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-          $asset = "Decro.Slint_${version}_portable_x64.zip"
+          $hash = (git rev-parse --short=7 HEAD).Trim()
+          $isRelease = $env:GITHUB_REF -like 'refs/tags/v*'
+          $label = if ($isRelease) { $version } else { "$version-$hash" }
+          $asset = "Decro.Slint_${label}_portable_x64.zip"
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/decro-slint.exe "dist/Decro Slint.exe" -Force
           Copy-Item README.md "dist/README.md" -Force
           Compress-Archive -Path "dist/*" -DestinationPath $asset -Force
-          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
-          "$hash  $asset" | Set-Content -Path sha256.txt -Encoding ascii
+          $sha256 = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          "$sha256  $asset" | Set-Content -Path sha256.txt -Encoding ascii
           "version=$version" >> $env:GITHUB_OUTPUT
+          "hash=$hash" >> $env:GITHUB_OUTPUT
           "asset=$asset" >> $env:GITHUB_OUTPUT
-          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "sha256=$sha256" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:

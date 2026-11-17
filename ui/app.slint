@@ -1006,6 +1006,7 @@ export component AppWindow inherits Window {
     in-out property <string> cookie-text: "";
 
     // Pages
+    in property <string> build-label: "";
     in property <string> page: "home";
     in property <string> status-text: "";
     in property <string> data-dir: "";
@@ -2274,7 +2275,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                Text { text: "Decro 0.4.7 · Slint 原生版 · 数据便携"; color: Theme.faint; font-size: 10px; horizontal-alignment: center; }
+                                Text { text: "Decro " + root.build-label + " · Slint 原生版 · 数据便携"; color: Theme.faint; font-size: 10px; horizontal-alignment: center; }
                                 }
                             }
                             Rectangle { horizontal-stretch: 1; }
