@@ -1638,13 +1638,10 @@ fn start_track(
     } else {
         selected_quality.clone()
     };
-    let track_quality = track.quality.clone();
     let quality_text = if selected_quality == "auto" {
         "自动".to_string()
-    } else if track.quality.is_empty() {
-        quality_label(&requested_quality).to_string()
     } else {
-        format!("{} · {}", quality_label(&requested_quality), track.quality)
+        quality_label(&requested_quality).to_string()
     };
     let cover = color_for(&track.id);
     let track_id = track.id.clone();
@@ -1826,12 +1823,13 @@ fn start_track(
                 }
             };
             let quality_track_id = audio_track_id.clone();
+            // The badge shows what is actually being streamed. The track's
+            // maximum available quality (Hi-Res/SQ/HQ) is metadata, not the
+            // current stream, so it is not appended here.
             let actual_quality = if resolved.trial {
                 format!("{} · 试听", quality_label(&resolved.level))
-            } else if track_quality.is_empty() {
-                quality_label(&resolved.level).to_string()
             } else {
-                format!("{} · {}", quality_label(&resolved.level), track_quality)
+                quality_label(&resolved.level).to_string()
             };
             update_ui(&ui, move |ui| {
                 if ui.get_current_id().as_str() == quality_track_id.as_str() {
@@ -2478,11 +2476,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             player.current = Some(track.clone());
             player.resume_position = resume_position;
         }
-        let quality_text = if track.quality.is_empty() {
-            quality_label(&snapshot.quality).to_string()
-        } else {
-            format!("{} · {}", quality_label(&snapshot.quality), track.quality)
-        };
+        let restored_quality = track_quality_map()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&track.id).cloned())
+            .unwrap_or_else(|| snapshot.quality.clone());
+        let quality_text = quality_label(&restored_quality).to_string();
         ui.set_current_id(track.id.clone().into());
         ui.set_current_title(track.name.clone().into());
         ui.set_current_artist(track.artist.clone().into());
