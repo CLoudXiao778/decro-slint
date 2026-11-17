@@ -4,7 +4,7 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：`0.4.7`（本次改动，待 CI；尚未打 tag/release）
+- 当前版本：`0.4.7`（main 已通过 CI；尚未打 tag/release）
 - 最新发布：仍是 `v0.4.2-slint`：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.2-slint`
   - 资产：`Decro.Slint_0.4.2_portable_x64.zip`
   - SHA256：`fa081e0cb62d3c635e72fabd9aaca4d63d3ffcd05641d5acc1bf22d0d665bee8`
