@@ -2893,6 +2893,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let logged_in = weak.upgrade().map(|ui| ui.get_logged_in()).unwrap_or(false);
             if let Some(ui) = weak.upgrade() {
+                // The full player sits above the page area, so a nav action
+                // from the titlebar (search/settings/explore/home) would
+                // otherwise switch the page underneath it and leave the user
+                // staring at the still-open player. Run the normal close
+                // animation so the destination is immediately visible.
+                if ui.get_player_visible() {
+                    ui.invoke_close_player();
+                }
                 switch_page(&ui, &page);
             }
             if page == "library" && logged_in {
