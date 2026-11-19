@@ -570,15 +570,6 @@ fn open_external_url(url: &str) -> bool {
     }
 }
 
-fn feature_index_for_today(len: usize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    let mut hasher = DefaultHasher::new();
-    home_cache::today_key().hash(&mut hasher);
-    (hasher.finish() as usize) % len
-}
-
 fn color_for(id: &str) -> Color {
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
@@ -2215,16 +2206,30 @@ fn load_home(
         let recent_covers = home.recent.clone();
         let daily_covers = home.daily.clone();
         let new_covers = home.new_songs.clone();
-        let recommend_all = home.recommended.clone();
+        // The right hero card is the radar playlist; keep it out of the
+        // recommendation shelf so the same playlist never appears twice.
+        let feature_dto = home
+            .recommended
+            .iter()
+            .find(|playlist| playlist.name.trim() == "私人雷达")
+            .or_else(|| {
+                home.recommended
+                    .iter()
+                    .find(|playlist| playlist.name.contains("私人雷达"))
+            })
+            .or_else(|| home.recommended.first())
+            .cloned();
+        let mut recommend_all = home.recommended.clone();
+        if let Some(feature) = &feature_dto {
+            let feature_name = feature.name.trim().to_string();
+            recommend_all.retain(|playlist| {
+                playlist.id != feature.id && playlist.name.trim() != feature_name
+            });
+        }
         let shelf: Vec<_> = recommend_all.iter().take(10).cloned().collect();
         let shelf_for_ui = shelf.clone();
         let recommend_all_for_ui = recommend_all.clone();
         let daily_first = home.daily.first().cloned();
-        // Rotate the large "为你推荐" card through the daily recommendations
-        // (the first six are normally the account's daily picks).
-        let feature_dto = recommend_all
-            .get(feature_index_for_today(recommend_all.len().min(6)))
-            .cloned();
         let daily_first_cover = daily_first.clone();
         let feature_cover = feature_dto.clone();
         let daily_count = home.daily.len();
