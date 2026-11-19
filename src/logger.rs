@@ -94,7 +94,8 @@ fn trim_logs(dir: &Path, keep: usize) {
         return;
     }
     logs.sort_by_key(|(modified, _)| *modified);
-    for (_, path) in logs.into_iter().take(logs.len() - keep) {
+    let remove_count = logs.len() - keep;
+    for (_, path) in logs.into_iter().take(remove_count) {
         let _ = fs::remove_file(path);
     }
 }
