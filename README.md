@@ -40,7 +40,7 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
 | `playlist-state.json` | 歌单置顶 ID 与打开次数（资料库排序） |
 | `track-quality.json` | 单曲音质覆盖（按歌曲 ID） |
 | `log-level` | 日志级别 |
-| `logs/decro.log` | 运行日志 |
+| `logs/log<启动时间>.log` | 每次启动的运行日志（最多保留 50 个） |
 | `covers/` | 封面缓存（启动时最多保留 3000 个文件） |
 | `audio-cache/` | 当前播放曲目的临时音频文件，启动时清理 |
 

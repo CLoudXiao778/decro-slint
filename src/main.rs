@@ -112,6 +112,110 @@ struct AudioHandle {
 const MAX_AUDIO_BYTES: u64 = 256 * 1024 * 1024;
 const AUDIO_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[allow(dead_code)]
+enum AudioOutput {
+    Custom(
+        rodio::cpal::Stream,
+        Arc<rodio::dynamic_mixer::DynamicMixerController<f32>>,
+    ),
+    Rodio(rodio::OutputStream),
+}
+
+/// Open a cpal stream with a larger fixed buffer than rodio's default and
+/// register the callback thread with MMCSS. A 100+ ms output buffer absorbs
+/// scheduler delays when the system is busy (opening a browser/app), which a
+/// decode-side prefetch buffer cannot cover.
+fn open_audio_output() -> Result<(rodio::Sink, AudioOutput, String), String> {
+    use rodio::cpal;
+    use rodio::cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| "没有默认音频输出设备".to_string())?;
+    let name = device.name().unwrap_or_else(|_| "unknown".to_string());
+    let supported = device
+        .default_output_config()
+        .map_err(|error| format!("读取音频输出配置失败: {error}"))?;
+    let sample_format = supported.sample_format();
+    let channels = supported.channels();
+    let sample_rate = supported.sample_rate().0;
+    let target_frames = ((sample_rate as f32 * 0.12) as u32).max(256);
+    let buffer_size = match *supported.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            cpal::BufferSize::Fixed(target_frames.clamp(min, max))
+        }
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Fixed(target_frames),
+    };
+    crate::logger::log(
+        "info",
+        "audio",
+        &format!(
+            "output device={name} channels={channels} rate={sample_rate} format={sample_format:?} buffer={buffer_size:?}"
+        ),
+    );
+    if sample_format != cpal::SampleFormat::F32 {
+        return Err(format!("默认输出格式 {sample_format:?} 不是 F32"));
+    }
+
+    let config = cpal::StreamConfig {
+        channels,
+        sample_rate: cpal::SampleRate(sample_rate),
+        buffer_size,
+    };
+    let (sink, queue_rx) = rodio::Sink::new_idle();
+    let (mixer, mut mixer_rx) = rodio::dynamic_mixer::mixer::<f32>(channels, sample_rate);
+    mixer.add(queue_rx);
+    #[cfg(windows)]
+    let mut mmcss_logged = false;
+    let stream = device
+        .build_output_stream(
+            &config,
+            move |data: &mut [f32], _| {
+                #[cfg(windows)]
+                if !mmcss_logged {
+                    mmcss_logged = true;
+                    let mut index = 0u32;
+                    let handle = unsafe {
+                        windows_sys::Win32::System::Threading::AvSetMmThreadCharacteristicsW(
+                            windows_sys::w!("Audio"),
+                            &mut index,
+                        )
+                    };
+                    if !handle.is_null() {
+                        unsafe {
+                            windows_sys::Win32::System::Threading::AvSetMmThreadPriority(
+                                handle,
+                                windows_sys::Win32::System::Threading::AVRT_PRIORITY_CRITICAL,
+                            );
+                        }
+                        crate::logger::log(
+                            "info",
+                            "audio",
+                            "output thread registered with MMCSS Audio (critical)",
+                        );
+                    }
+                }
+                for sample in data.iter_mut() {
+                    *sample = mixer_rx.next().unwrap_or(0.0);
+                }
+            },
+            move |error| {
+                crate::logger::log("warn", "audio", &format!("output stream error: {error}"));
+            },
+            None,
+        )
+        .map_err(|error| format!("创建音频输出流失败: {error}"))?;
+    stream
+        .play()
+        .map_err(|error| format!("启动音频输出流失败: {error}"))?;
+    Ok((
+        sink,
+        AudioOutput::Custom(stream, mixer),
+        format!("custom buffer={buffer_size:?} rate={sample_rate}"),
+    ))
+}
+
 fn spawn_audio() -> AudioHandle {
     let (tx, rx) = mpsc::channel::<AudioCmd>();
     let snapshot = Arc::new(Mutex::new(AudioSnapshot::default()));
@@ -128,14 +232,30 @@ fn spawn_audio() -> AudioHandle {
                 state.playing = false;
             }
         };
-        let Ok((_stream, handle)) = rodio::OutputStream::try_default() else {
-            fail("无法打开系统音频输出");
-            return;
+        let (sink, _output, output_description) = match open_audio_output() {
+            Ok(output) => output,
+            Err(error) => {
+                crate::logger::log(
+                    "warn",
+                    "audio",
+                    &format!("custom output failed: {error}; falling back to rodio default"),
+                );
+                let Ok((stream, handle)) = rodio::OutputStream::try_default() else {
+                    fail("无法打开系统音频输出");
+                    return;
+                };
+                let Ok(sink) = rodio::Sink::try_new(&handle) else {
+                    fail("无法初始化音频播放器");
+                    return;
+                };
+                (
+                    sink,
+                    AudioOutput::Rodio(stream),
+                    "rodio default".to_string(),
+                )
+            }
         };
-        let Ok(sink) = rodio::Sink::try_new(&handle) else {
-            fail("无法初始化音频播放器");
-            return;
-        };
+        crate::logger::log("info", "audio", &format!("output {output_description}"));
         sink.set_volume(0.7);
         logger::log(
             "info",
@@ -2097,8 +2217,8 @@ fn load_home(
         let new_covers = home.new_songs.clone();
         let recommend_all = home.recommended.clone();
         let shelf: Vec<_> = recommend_all.iter().take(10).cloned().collect();
-        let shelf_items = playlist_items_for_ui(&shelf);
-        let recommend_all_items = playlist_items_for_ui(&recommend_all);
+        let shelf_for_ui = shelf.clone();
+        let recommend_all_for_ui = recommend_all.clone();
         let daily_first = home.daily.first().cloned();
         // Rotate the large "为你推荐" card through the daily recommendations
         // (the first six are normally the account's daily picks).
@@ -2118,8 +2238,12 @@ fn load_home(
             ui.set_new_tracks(ModelRc::from(Rc::new(VecModel::from(track_items_for_ui(
                 &home.new_songs,
             )))));
-            ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(shelf_items))));
-            ui.set_recommend_all(ModelRc::from(Rc::new(VecModel::from(recommend_all_items))));
+            ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
+                playlist_items_for_ui(&shelf_for_ui),
+            ))));
+            ui.set_recommend_all(ModelRc::from(Rc::new(VecModel::from(
+                playlist_items_for_ui(&recommend_all_for_ui),
+            ))));
 
             let daily_tint = daily_first
                 .as_ref()
@@ -2333,6 +2457,18 @@ fn load_library(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     libnetease::init();
     logger::init(paths::log_dir());
+    logger::log(
+        "info",
+        "app",
+        &format!(
+            "build={BUILD_LABEL} os={} arch={} cpus={}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(0)
+        ),
+    );
     paths::clean_audio_cache();
     paths::trim_cover_cache(3000);
 

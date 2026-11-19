@@ -41,6 +41,7 @@
 - 关闭修复：X/Alt+F4 退出事件循环并结束进程（2 秒强制退出兜底）。
 - 内存日志与最小化工作集回收（`target=memory`）；播放期间跳过 `EmptyWorkingSet`，避免解码页被换出造成音频停顿。
 - 15 秒预解码缓冲（`src/audio_buffer.rs`）：后台线程提前解码，实时输出线程只取已解码样本；跳转时异步重建缓冲，欠载写 `prefetch underrun` 日志。
+- 音频输出使用约 120ms 固定缓冲并注册 MMCSS Audio 线程（`open_audio_output`），设备不支持时回退 rodio 默认输出；用于缓解打开浏览器/应用时系统调度造成的输出线程卡顿。
 - 首页推荐：每日推荐歌单 + 公开推荐合并去重（最多 30 个），首页架显示 10 个，“更多”进入完整列表；右侧大卡片按日期轮换，推荐日缓存 `data/home-cache.json`。
 - 性能优化：OpenGL 硬件渲染、环境光预渲染、播放页背景去 1.16x 过采样、播放页展开后隐藏背后工作区。
 
@@ -51,7 +52,7 @@
 - `src/netease.rs` / `src/libnetease.rs` / `vendor/libnetease/`：网易云 API 与 C 封装。
 - `src/media.rs`：Windows SMTC + 任务栏缩略图/进度（独立线程 + 原子命令）+ 剪贴板文本。
 - `src/memory.rs`：working set / private 统计与 `EmptyWorkingSet`。
-- `src/auth.rs`、`src/state.rs`、`src/logger.rs`、`src/paths.rs`、`src/secure_store.rs`。
+- `src/auth.rs`、`src/state.rs`、`src/logger.rs`（每次启动新建 `logs/log<时间>.log`）、`src/paths.rs`、`src/secure_store.rs`、`src/home_cache.rs`。
 - `assets/icons/`、`assets/wave.svg`、`assets/icon.png`。
 - `Cargo.toml`、`build.rs`、`.github/workflows/build.yml`。
 - `CHANGELOG.md`、`README.md`。
@@ -70,7 +71,7 @@
 ## 当前待办/风险
 
 - **最新发布仍是 0.4.2**：0.4.3/0.4.4 的雷达歌单改动和 release/tag 已作为误判删除。
-- **未发布迭代待 Windows 真机验证**：新增 15 秒预解码缓冲，实时输出线程不再直接解码；若仍有卡顿，先看日志里是否出现 `prefetch underrun`，再排查系统音频设备/驱动。首页推荐按推荐日缓存，日志会记录 `cache hit` 或 `recommended count/first`；同一天重复进入首页不应再出现 HTTP 推荐请求。播放期间跳过工作集裁剪并新增 `target=audio playback gap` 日志。播放时最小化内存不会再降到 0.2MB，这是有意的取舍。音质徽标只显示实际音质；播放页打开时标题栏搜索/设置会先收起播放页。
+- **未发布迭代待 Windows 真机验证**：新增 15 秒预解码缓冲和约 120ms 输出缓冲 + MMCSS；若仍有卡顿，先看日志里的 `output device=` / `custom buffer=` / `MMCSS` 是否生效，以及是否出现 `prefetch underrun` 或 `playback gap`。首页推荐按推荐日缓存，日志会记录 `cache hit` 或 `recommended count/first`；同一天重复进入首页不应再出现 HTTP 推荐请求。播放期间跳过工作集裁剪并新增 `target=audio playback gap` 日志。播放时最小化内存不会再降到 0.2MB，这是有意的取舍。音质徽标只显示实际音质；播放页打开时标题栏搜索/设置会先收起播放页。
 - **Windows 11 任务栏**：如果系统不显示传统缩略图工具栏，任务栏上一首/播放暂停/下一首按钮不可见；进度条仍可用。Explorer 重启后按钮可能消失，当前未监听 `TaskbarButtonCreated` 重新添加。
 - **性能**：已切换 OpenGL femtovg；若仍卡顿，先确认任务管理器 GPU 占用非 0，再排查长列表（资料库/最近播放/详情/搜索）虚拟化。
 - **功能差距**：应用级快捷键/命令面板、窗口大小位置持久化、单实例唤回、桌面歌词/托盘。

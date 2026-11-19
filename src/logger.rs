@@ -45,6 +45,60 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+#[cfg(windows)]
+fn startup_stamp() -> String {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+
+    let mut time: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe {
+        GetLocalTime(&mut time);
+    }
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}{:03}",
+        time.wYear,
+        time.wMonth,
+        time.wDay,
+        time.wHour,
+        time.wMinute,
+        time.wSecond,
+        time.wMilliseconds
+    )
+}
+
+#[cfg(not(windows))]
+fn startup_stamp() -> String {
+    format!("{}", now_ms())
+}
+
+fn trim_logs(dir: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("log") || !name.ends_with(".log") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        logs.push((meta.modified().unwrap_or(UNIX_EPOCH), path));
+    }
+    if logs.len() <= keep {
+        return;
+    }
+    logs.sort_by_key(|(modified, _)| *modified);
+    for (_, path) in logs.into_iter().take(logs.len() - keep) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 pub fn init(dir: PathBuf) {
     if LOGGER.get().is_some() {
         return;
@@ -55,14 +109,19 @@ pub fn init(dir: PathBuf) {
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let path = dir.join("decro.log");
+    trim_logs(&dir, 50);
+    let path = dir.join(format!("log{}.log", startup_stamp()));
     let file = OpenOptions::new().create(true).append(true).open(&path);
     let Ok(file) = file else { return };
     let _ = LOGGER.set(Logger {
-        path,
+        path: path.clone(),
         file: Mutex::new(file),
     });
-    log("info", "app", "logger initialized");
+    log(
+        "info",
+        "app",
+        &format!("logger initialized file={}", path.display()),
+    );
 }
 
 pub fn log(level: &str, target: &str, message: &str) {
