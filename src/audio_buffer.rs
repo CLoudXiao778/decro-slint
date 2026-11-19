@@ -53,6 +53,7 @@ pub struct PrefetchSource {
     sample_rate: u32,
     total_duration: Option<Duration>,
     underrun_logged: bool,
+    seeking: bool,
 }
 
 impl PrefetchSource {
@@ -126,6 +127,7 @@ impl PrefetchSource {
             sample_rate,
             total_duration,
             underrun_logged: false,
+            seeking: false,
         }
     }
 }
@@ -151,8 +153,9 @@ impl Iterator for PrefetchSource {
             if state.finished {
                 return None;
             }
+            let seeking = self.seeking;
             drop(state);
-            if !self.underrun_logged {
+            if !seeking && !self.underrun_logged {
                 self.underrun_logged = true;
                 crate::logger::log("warn", "audio", "prefetch underrun: buffer empty");
             }
@@ -165,6 +168,8 @@ impl Iterator for PrefetchSource {
         self.chunk.clear();
         self.chunk.extend(state.samples.drain(..take));
         self.chunk_pos = 1;
+        self.seeking = false;
+        self.underrun_logged = false;
         self.chunk.first().copied()
     }
 }
@@ -189,6 +194,7 @@ impl Source for PrefetchSource {
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
         self.chunk.clear();
         self.chunk_pos = 0;
+        self.seeking = true;
         let mut state = match self.shared.state.lock() {
             Ok(state) => state,
             Err(_) => {
