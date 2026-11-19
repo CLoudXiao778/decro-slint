@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3
 
 - 运行日志改为每次启动生成 `logs/logYYYYMMDDHHMMSSmmm.log`（例如 `log202611191824450.log`），最多保留 50 个；启动日志记录版本、系统、音频设备格式和缓冲区
 - 音频输出改用约 120ms 固定缓冲（受设备支持范围限制）并注册 MMCSS Audio 线程，吸收打开浏览器/应用时的系统调度抖动；创建失败自动回退 rodio 默认输出

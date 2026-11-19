@@ -4,7 +4,7 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：基础版本 `0.4.2` + 提交短 hash；迭代构建显示为 `0.4.2+<short hash>`，常规修改不提升版本号
+- 当前版本：`0.4.3`（准备发布；普通迭代构建仍显示为 `0.4.3+<short hash>`）
 - 最近验证构建：`0.4.2+8eeef5b`（固定欧美私人雷达 + 随机歌单 + 右侧私人雷达大卡片去重 + 推荐日缓存/更多页 + 15 秒预解码缓冲 + 120ms 输出缓冲/MMCSS + 每次启动日志，Actions run 44515798279 通过）
 - 最新发布：仍是 `v0.4.2-slint`：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.2-slint`
   - 资产：`Decro.Slint_0.4.2_portable_x64.zip`

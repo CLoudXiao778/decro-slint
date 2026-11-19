@@ -59,10 +59,10 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
 
 1. 把 `CHANGELOG.md` 的 `Unreleased` 段改为新版本号，并更新 `Cargo.toml` 版本。
 2. 提交并推送 `main`，确认 Actions 的格式检查、测试和构建通过。
-3. 推送与版本一致的 tag，例如 `v0.5.0-slint`：
+3. 推送与版本一致的 tag，例如 `v0.4.3-slint`：
    ```bash
-   git tag v0.5.0-slint
-   git push origin v0.5.0-slint
+   git tag v0.4.3-slint
+   git push origin v0.4.3-slint
    ```
 4. Actions 会再次运行格式检查、测试和 release 构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 GitHub prerelease。
 5. 发布资产使用干净的 `Decro.Slint_<version>_portable_x64.zip`，并附带 SHA256。
