@@ -611,8 +611,43 @@ pub async fn recent_played(state: &AppState) -> Result<Vec<TrackDto>, String> {
 pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
     let recommended_query = [("limit", "12".to_string())];
     let new_songs_query = [("limit", "12".to_string())];
+    let logged_in = state.account().is_some();
+    // Logged-in users get the account's daily "推荐歌单" from the weapi
+    // discovery endpoint. The public /api/personalized/playlist endpoint is
+    // not personalized and can return the same generic list for days.
+    let recommended_task = async {
+        if logged_in {
+            match tokio::task::spawn_blocking(crate::libnetease::recommend_resource).await {
+                Ok(Ok(value)) => {
+                    let mut list = playlists_from(value.get("recommend"));
+                    if list.is_empty() {
+                        list = playlists_from(value.get("result"));
+                    }
+                    if !list.is_empty() {
+                        return Ok(value);
+                    }
+                    crate::logger::log("warn", "home", "daily recommend resource was empty");
+                }
+                Ok(Err(error)) => {
+                    crate::logger::log(
+                        "warn",
+                        "home",
+                        &format!("daily recommend resource failed: {error}"),
+                    );
+                }
+                Err(error) => {
+                    crate::logger::log(
+                        "warn",
+                        "home",
+                        &format!("daily recommend resource task failed: {error}"),
+                    );
+                }
+            }
+        }
+        get_json(state, "/api/personalized/playlist", &recommended_query).await
+    };
     let (recommended_json, new_songs_json) = tokio::join!(
-        get_json(state, "/api/personalized/playlist", &recommended_query),
+        recommended_task,
         get_json(state, "/api/personalized/newsong", &new_songs_query),
     );
     if recommended_json.is_err() && new_songs_json.is_err() {
@@ -624,7 +659,24 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
 
     let mut errors = Vec::new();
     let recommended = match recommended_json {
-        Ok(value) => playlists_from(value.get("result")),
+        Ok(value) => {
+            let mut list = playlists_from(value.get("recommend"));
+            if list.is_empty() {
+                list = playlists_from(value.get("result"));
+            }
+            crate::logger::log(
+                "info",
+                "home",
+                &format!(
+                    "recommended count={} first={}",
+                    list.len(),
+                    list.first()
+                        .map(|playlist| format!("{}:{}", playlist.id, playlist.name))
+                        .unwrap_or_else(|| "-".to_string())
+                ),
+            );
+            list
+        }
         Err(error) => {
             errors.push(format!("推荐歌单：{error}"));
             Vec::new()

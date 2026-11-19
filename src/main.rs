@@ -811,6 +811,7 @@ fn cover_buffer(path: &std::path::Path) -> Option<SharedPixelBuffer<Rgba8Pixel>>
 }
 
 static STATUS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static LAST_HOME_LOAD: OnceLock<Mutex<Instant>> = OnceLock::new();
 static WINDOW_RESTORED: AtomicBool = AtomicBool::new(false);
 static WINDOW_MINIMIZED: AtomicBool = AtomicBool::new(false);
 static WINDOW_BACKGROUNDED: AtomicBool = AtomicBool::new(false);
@@ -926,6 +927,20 @@ fn set_status_temp(ui: &AppWindow, message: String, duration: Duration) {
             }
         }
     });
+}
+
+fn home_refresh_due() -> bool {
+    LAST_HOME_LOAD
+        .get_or_init(|| {
+            Mutex::new(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(3600))
+                    .unwrap_or_else(Instant::now),
+            )
+        })
+        .lock()
+        .map(|last| last.elapsed() >= Duration::from_secs(3600))
+        .unwrap_or(true)
 }
 
 fn switch_page(ui: &AppWindow, page: &str) {
@@ -2010,6 +2025,12 @@ fn load_home(
                 if state.session_epoch() != epoch {
                     return;
                 }
+                if let Ok(mut last) = LAST_HOME_LOAD
+                    .get_or_init(|| Mutex::new(Instant::now()))
+                    .lock()
+                {
+                    *last = Instant::now();
+                }
                 let local = local_recent()
                     .lock()
                     .map(|list| list.clone())
@@ -2407,6 +2428,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_log_level(log_level.into());
     {
         let weak = weak.clone();
+        let restore_runtime = runtime.clone();
+        let restore_state = state.clone();
+        let restore_catalog = catalog.clone();
         let restore_timer = Timer::default();
         restore_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             let ui = weak.upgrade();
@@ -2428,6 +2452,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // restoring a minimized window on Windows. Changing a full-window
                     // overlay forces it to repaint every pixel.
                     ui.set_repaint_nudge(!ui.get_repaint_nudge());
+                    if ui.get_page() == "home" && !ui.get_login_open() && home_refresh_due() {
+                        load_home(
+                            &restore_runtime,
+                            restore_state.clone(),
+                            weak.clone(),
+                            restore_catalog.clone(),
+                        );
+                    }
                 }
                 memory::log_stats("restored", "info");
             }
@@ -2453,6 +2485,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+    }
+
+    // Daily recommendations must not stay frozen in a window that remains
+    // open for days. Check at most once an hour while the home page is
+    // visible; restoring from minimize also triggers a due refresh.
+    {
+        let runtime = runtime.clone();
+        let state = state.clone();
+        let weak = weak.clone();
+        let catalog = catalog.clone();
+        let refresh_timer = Timer::default();
+        refresh_timer.start(TimerMode::Repeated, Duration::from_secs(600), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_page() != "home" || ui.get_login_open() || ui.get_window_minimized() {
+                return;
+            }
+            if home_refresh_due() {
+                load_home(&runtime, state.clone(), weak.clone(), catalog.clone());
+            }
+        });
+        std::mem::forget(refresh_timer);
     }
 
     ui.set_status_text("正在检查登录状态…".into());
