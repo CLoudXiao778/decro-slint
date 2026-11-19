@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod audio_buffer;
 mod auth;
 mod libnetease;
 mod logger;
@@ -135,11 +136,23 @@ fn spawn_audio() -> AudioHandle {
             return;
         };
         sink.set_volume(0.7);
+        logger::log(
+            "info",
+            "audio",
+            &format!(
+                "decode buffer: {}s ahead, 1s prefill",
+                audio_buffer::PREFETCH_SECONDS
+            ),
+        );
         let mut loaded = false;
         let mut current_token: u64 = 0;
         let mut last_token: u64 = 0;
         let mut decoded_duration: Option<f32> = None;
         let mut current_path: Option<PathBuf> = None;
+        // The decoder thread may still hold the old cache file open for a few
+        // ms after the sink is stopped, so retry deletion instead of leaking
+        // one file per track transition on Windows.
+        let mut pending_delete: Vec<PathBuf> = Vec::new();
         let mut pending_seek: Option<(u64, f32)> = None;
         // Baseline for detecting audio dropouts: wall-clock time and sink
         // position. A 0.2 s underrun shows up as the position advancing less
@@ -154,7 +167,7 @@ fn spawn_audio() -> AudioHandle {
                     autoplay,
                 }) => {
                     if token < last_token {
-                        let _ = fs::remove_file(&path);
+                        pending_delete.push(path);
                         continue;
                     }
                     last_token = token;
@@ -163,7 +176,7 @@ fn spawn_audio() -> AudioHandle {
                     decoded_duration = None;
                     probe = None;
                     if let Some(old) = current_path.take() {
-                        let _ = fs::remove_file(old);
+                        pending_delete.push(old);
                     }
                     if let Some((pending_token, value)) = pending_seek.take() {
                         if pending_token == token {
@@ -182,7 +195,7 @@ fn spawn_audio() -> AudioHandle {
                                 state.error = Some(format!("音频文件打开失败: {error}"));
                                 state.token = token;
                             }
-                            let _ = fs::remove_file(&path);
+                            pending_delete.push(path);
                             current_token = token;
                             continue;
                         }
@@ -215,7 +228,7 @@ fn spawn_audio() -> AudioHandle {
                                     ),
                                 );
                             }
-                            sink.append(decoder);
+                            sink.append(audio_buffer::PrefetchSource::new(decoder));
                             if autoplay {
                                 sink.play();
                             } else {
@@ -248,7 +261,7 @@ fn spawn_audio() -> AudioHandle {
                                 state.token = token;
                             }
                             current_token = token;
-                            let _ = fs::remove_file(&path);
+                            pending_delete.push(path);
                         }
                     }
                 }
@@ -290,7 +303,7 @@ fn spawn_audio() -> AudioHandle {
                     pending_seek = None;
                     probe = None;
                     if let Some(path) = current_path.take() {
-                        let _ = fs::remove_file(path);
+                        pending_delete.push(path);
                     }
                     if let Ok(mut state) = snap.lock() {
                         state.position = 0.0;
@@ -305,7 +318,7 @@ fn spawn_audio() -> AudioHandle {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if let Some(path) = current_path.take() {
-                        let _ = fs::remove_file(path);
+                        pending_delete.push(path);
                     }
                     memory::set_audio_active(false);
                     break;
@@ -355,6 +368,11 @@ fn spawn_audio() -> AudioHandle {
                     state.ended = true;
                 }
             }
+            pending_delete.retain(|path| match fs::remove_file(path) {
+                Ok(()) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            });
         }
     });
     AudioHandle { tx, snapshot }
