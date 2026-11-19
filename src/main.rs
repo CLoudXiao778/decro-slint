@@ -2213,9 +2213,9 @@ fn load_home(
             .iter()
             .find(|playlist| playlist.name.trim() == "私人雷达")
             .or_else(|| {
-                home.recommended
-                    .iter()
-                    .find(|playlist| playlist.name.contains("私人雷达"))
+                home.recommended.iter().find(|playlist| {
+                    playlist.name.contains("私人雷达") && !playlist.name.contains("欧美私人雷达")
+                })
             })
             .or_else(|| home.recommended.first())
             .cloned();

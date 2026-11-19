@@ -624,70 +624,176 @@ async fn daily_recommend_songs(state: &AppState) -> Result<Value, String> {
     get_json(state, "/api/v3/discovery/recommend/songs", &query).await
 }
 
+fn push_playlist_unique(
+    list: &mut Vec<PlaylistDto>,
+    ids: &mut std::collections::HashSet<String>,
+    names: &mut std::collections::HashSet<String>,
+    playlist: PlaylistDto,
+) {
+    let name = playlist.name.trim().to_string();
+    if ids.insert(playlist.id.clone()) && names.insert(name) {
+        list.push(playlist);
+    }
+}
+
+fn clean_search_name(name: &str) -> String {
+    name.replace("<em>", "")
+        .replace("</em>", "")
+        .replace("&amp;", "&")
+}
+
+async fn search_radar_playlists(state: &AppState) -> Result<Vec<PlaylistDto>, String> {
+    let query = [
+        ("s", "私人雷达".to_string()),
+        ("type", "1000".to_string()),
+        ("limit", "50".to_string()),
+        ("offset", "0".to_string()),
+    ];
+    let value = get_json(state, "/api/cloudsearch/pc", &query).await?;
+    let mut items = value
+        .pointer("/result/playlists")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(normalize_playlist)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for item in &mut items {
+        item.name = clean_search_name(&item.name);
+    }
+    Ok(items)
+}
+
+async fn random_playlists() -> Vec<PlaylistDto> {
+    use rand::Rng;
+
+    let offset = rand::thread_rng().gen_range(0..8usize) * 30;
+    for (cat, offset) in [("欧美", offset), ("全部", 0)] {
+        let cat_text = cat.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::libnetease::playlist_list(&cat_text, 30, offset)
+        })
+        .await;
+        let Ok(Ok(value)) = result else {
+            continue;
+        };
+        let items = value
+            .get("playlists")
+            .or_else(|| value.pointer("/result/playlists"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(normalize_playlist)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !items.is_empty() {
+            crate::logger::log(
+                "info",
+                "home",
+                &format!(
+                    "random playlists cat={cat} offset={offset} count={}",
+                    items.len()
+                ),
+            );
+            return items;
+        }
+    }
+    crate::logger::log("warn", "home", "random playlist list failed or empty");
+    Vec::new()
+}
+
 pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
-    let generic_query = [("limit", "30".to_string())];
     let new_songs_query = [("limit", "12".to_string())];
     let logged_in = state.account().is_some();
 
-    // Logged-in users get the account's daily "推荐歌单" from the weapi
-    // discovery endpoint. That endpoint usually returns six cards, so fill the
-    // rest of the home shelf and the "more" page from the public list.
+    // The shelf is intentionally not built from the old public
+    // /api/personalized/playlist stream. It starts with the fixed
+    // "欧美私人雷达" playlist, keeps the account's "私人雷达" for the hero card,
+    // and fills the rest with a random page from the playlist square.
     let recommended_task = async {
+        let radar = match search_radar_playlists(state).await {
+            Ok(list) => list,
+            Err(error) => {
+                crate::logger::log("warn", "home", &format!("radar search failed: {error}"));
+                Vec::new()
+            }
+        };
         let mut list = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut ids = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
 
-        if logged_in {
+        if let Some(fixed) = radar
+            .iter()
+            .find(|playlist| playlist.name.contains("欧美私人雷达"))
+            .cloned()
+        {
+            push_playlist_unique(&mut list, &mut ids, &mut names, fixed);
+        }
+        if let Some(hero) = radar
+            .iter()
+            .find(|playlist| playlist.name.trim() == "私人雷达")
+            .or_else(|| {
+                radar.iter().find(|playlist| {
+                    playlist.name.contains("私人雷达") && !playlist.name.contains("欧美私人雷达")
+                })
+            })
+            .cloned()
+        {
+            push_playlist_unique(&mut list, &mut ids, &mut names, hero);
+        }
+        for playlist in random_playlists().await {
+            push_playlist_unique(&mut list, &mut ids, &mut names, playlist);
+        }
+
+        let has_hero = list
+            .iter()
+            .any(|playlist| playlist.name.trim() == "私人雷达");
+        if logged_in && (!has_hero || list.len() < 10) {
             match tokio::task::spawn_blocking(crate::libnetease::recommend_resource).await {
                 Ok(Ok(value)) => {
                     for playlist in playlists_from(value.get("recommend"))
                         .into_iter()
                         .chain(playlists_from(value.get("result")))
                     {
-                        if seen.insert(playlist.id.clone()) {
-                            list.push(playlist);
-                        }
+                        push_playlist_unique(&mut list, &mut ids, &mut names, playlist);
                     }
                 }
                 Ok(Err(error)) => {
                     crate::logger::log(
                         "warn",
                         "home",
-                        &format!("daily recommend resource failed: {error}"),
+                        &format!("radar fallback resource failed: {error}"),
                     );
                 }
                 Err(error) => {
                     crate::logger::log(
                         "warn",
                         "home",
-                        &format!("daily recommend resource task failed: {error}"),
+                        &format!("radar fallback resource task failed: {error}"),
                     );
                 }
             }
         }
 
-        match get_json(state, "/api/personalized/playlist", &generic_query).await {
-            Ok(value) => {
-                for playlist in playlists_from(value.get("result")) {
-                    if seen.insert(playlist.id.clone()) {
-                        list.push(playlist);
-                    }
-                }
-            }
-            Err(error) => {
-                if list.is_empty() {
-                    return Err(format!("推荐歌单：{error}"));
-                }
-                crate::logger::log(
-                    "warn",
-                    "home",
-                    &format!("generic recommendations failed: {error}"),
-                );
+        // The fixed playlist must be the first shelf item even when it came
+        // from the random page or the daily fallback.
+        if let Some(index) = list
+            .iter()
+            .position(|playlist| playlist.name.contains("欧美私人雷达"))
+        {
+            if index > 0 {
+                let fixed = list.remove(index);
+                list.insert(0, fixed);
             }
         }
 
         list.truncate(30);
         if list.is_empty() {
-            return Err("推荐歌单：网易云没有返回歌单".to_string());
+            return Err("推荐歌单：没有获取到歌单".to_string());
         }
         Ok(list)
     };

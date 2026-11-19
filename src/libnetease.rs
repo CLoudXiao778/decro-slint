@@ -81,6 +81,11 @@ extern "C" {
     fn ne_album_detail(id: *const c_char) -> *mut NeResp;
     fn ne_recommend_resource() -> *mut NeResp;
     fn ne_recommend_songs() -> *mut NeResp;
+    fn ne_playlist_list(
+        cat: *const c_char,
+        limit: *const c_char,
+        offset: *const c_char,
+    ) -> *mut NeResp;
     fn ne_playlist_subscribe(id: *const c_char, t: *const c_char) -> *mut NeResp;
     fn ne_playlist_create(name: *const c_char, privacy: *const c_char) -> *mut NeResp;
     fn ne_resp_free(resp: *mut NeResp);
@@ -443,6 +448,15 @@ pub fn recommend_songs() -> Result<Value, String> {
     init();
     let resp = unsafe { ne_recommend_songs() };
     response_json(resp, "每日推荐歌曲")
+}
+
+pub fn playlist_list(cat: &str, limit: usize, offset: usize) -> Result<Value, String> {
+    init();
+    let cat = cstring(cat);
+    let limit = cstring(&limit.to_string());
+    let offset = cstring(&offset.to_string());
+    let resp = unsafe { ne_playlist_list(cat.as_ptr(), limit.as_ptr(), offset.as_ptr()) };
+    response_json(resp, "歌单列表")
 }
 
 pub fn playlist_subscribe(id: &str, subscribe: bool) -> Result<(), String> {
