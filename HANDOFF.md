@@ -4,12 +4,12 @@
 
 - 工作目录：`/home/cloud/code/decro-slint`
 - 仓库：`https://github.com/CLoudXiao778/decro-slint`，分支 `main`
-- 当前版本：`0.4.3`（准备发布；普通迭代构建仍显示为 `0.4.3+<short hash>`）
-- 最近验证构建：`0.4.2+8eeef5b`（固定欧美私人雷达 + 随机歌单 + 右侧私人雷达大卡片去重 + 推荐日缓存/更多页 + 15 秒预解码缓冲 + 120ms 输出缓冲/MMCSS + 每次启动日志，Actions run 44515798279 通过）
-- 最新发布：仍是 `v0.4.2-slint`：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.2-slint`
-  - 资产：`Decro.Slint_0.4.2_portable_x64.zip`
-  - SHA256：`fa081e0cb62d3c635e72fabd9aaca4d63d3ffcd05641d5acc1bf22d0d665bee8`
-- 0.4.3 / 0.4.4 的雷达歌单改动和对应 release/tag 已作为误判删除，不再保留；0.4.5–0.4.7 也不再作为独立版本，相关改动统一记录在 `CHANGELOG.md` 的 `Unreleased`
+- 当前版本：`0.4.3`（已发布预发布版 `v0.4.3-slint`，commit `f34909d`；后续普通迭代构建显示为 `0.4.3+<short hash>`）
+- 最新发布：`https://github.com/CLoudXiao778/decro-slint/releases/tag/v0.4.3-slint`
+  - 资产：`Decro.Slint_0.4.3_portable_x64.zip`
+  - SHA256：`a5958ff0734fd844d4d5255eedd1e265d5b4d894f500910099374367b6d70a3a`
+  - 预发布；固定欧美私人雷达 + 随机歌单、右侧私人雷达大卡片去重、推荐日缓存/更多页、15 秒预解码缓冲、120ms 输出缓冲/MMCSS、每次启动独立日志仍需 Windows 真机验证
+- 历史上误发的雷达 0.4.3 / 0.4.4 release/tag 已删除；本次 `v0.4.3-slint` 是重新发布的当前版本
 - 定位：Tauri 版 Decro 的原生 Slint 重写，Windows x64 便携版。当前开始作为正式项目开发，不再是方案验证。
 - Tauri 参考仓库：`/home/cloud/code/neteaseM3PC`（只读参考；本对话后续专注修 Slint，不要再把两者混在一起改）。
 
@@ -21,7 +21,7 @@
 - 中文界面；UI 按 Tauri 截图/CSS 重绘，不另起炉灶。0.4.0 起支持浅色/深色主题，播放页保持深色。
 - 渲染限制：没有 WebView 式实时 `backdrop-filter`；封面模糊是 `image` crate 预生成的真实模糊图。
 
-## 已实现能力（0.4.2 + 迭代）
+## 已实现能力（0.4.3）
 
 - 网易云扫码登录、Cookie 导入、登录态恢复（DPAPI）。
 - 首页/推荐/资料库/搜索/歌单详情/最近播放/每日推荐；推荐歌单按推荐日（06:00 切换）缓存，同一天不重复请求。
@@ -61,7 +61,7 @@
 
 - **只使用 GitHub Actions**（`.github/workflows/build.yml`），不在本地或 `/tmp` 做发布构建，不再手动 `gh release create`，也不再通过取消 tag workflow 来保护手工资产。
 - push `main`：自动运行 `cargo fmt --all -- --check`、`cargo test --locked`、Windows MSVC release 构建，并上传 Actions artifact；不发布、不提升版本号。
-- 迭代构建的应用 footer 显示 `0.4.2+<short hash>`，产物名为 `Decro.Slint_<version>-<hash>_portable_x64.zip`，用 hash 区分每次提交。
+- 迭代构建的应用 footer 显示 `0.4.3+<short hash>`，产物名为 `Decro.Slint_<version>-<hash>_portable_x64.zip`，用 hash 区分每次提交。
 - 只有积累到值得发布时才提升 `Cargo.toml` 版本：把 `CHANGELOG.md` 的 `Unreleased` 改成新版本号段，push `main`，再推送 `vX.Y.Z-slint` tag。
 - push tag：同样先格式检查、测试、构建；校验 tag 与 `Cargo.toml` 版本一致后，自动发布 prerelease，资产使用干净的 `Decro.Slint_<version>_portable_x64.zip`，并附带 `sha256.txt`。
 - Actions 使用 Windows MSVC + 静态 CRT。
@@ -70,8 +70,8 @@
 
 ## 当前待办/风险
 
-- **最新发布仍是 0.4.2**：0.4.3/0.4.4 的雷达歌单改动和 release/tag 已作为误判删除。
-- **未发布迭代待 Windows 真机验证**：新增 15 秒预解码缓冲和约 120ms 输出缓冲 + MMCSS；若仍有卡顿，先看日志里的 `output device=` / `custom buffer=` / `MMCSS` 是否生效，以及是否出现 `prefetch underrun` 或 `playback gap`。首页推荐按推荐日缓存，日志会记录 `cache hit` 或 `recommended count/first`；同一天重复进入首页不应再出现 HTTP 推荐请求。播放期间跳过工作集裁剪并新增 `target=audio playback gap` 日志。播放时最小化内存不会再降到 0.2MB，这是有意的取舍。音质徽标只显示实际音质；播放页打开时标题栏搜索/设置会先收起播放页。
+- **最新发布为 0.4.3**：`v0.4.3-slint` 已由 GitHub Actions 自动发布并校验 SHA256。
+- **0.4.3 待 Windows 真机验证**：新增 15 秒预解码缓冲和约 120ms 输出缓冲 + MMCSS；若仍有卡顿，先看日志里的 `output device=` / `custom buffer=` / `MMCSS` 是否生效，以及是否出现 `prefetch underrun` 或 `playback gap`。首页推荐按推荐日缓存，日志会记录 `cache hit` 或 `recommended count/first`；同一天重复进入首页不应再出现 HTTP 推荐请求。播放期间跳过工作集裁剪并新增 `target=audio playback gap` 日志。播放时最小化内存不会再降到 0.2MB，这是有意的取舍。音质徽标只显示实际音质；播放页打开时标题栏搜索/设置会先收起播放页。
 - **Windows 11 任务栏**：如果系统不显示传统缩略图工具栏，任务栏上一首/播放暂停/下一首按钮不可见；进度条仍可用。Explorer 重启后按钮可能消失，当前未监听 `TaskbarButtonCreated` 重新添加。
 - **性能**：已切换 OpenGL femtovg；若仍卡顿，先确认任务管理器 GPU 占用非 0，再排查长列表（资料库/最近播放/详情/搜索）虚拟化。
 - **功能差距**：应用级快捷键/命令面板、窗口大小位置持久化、单实例唤回、桌面歌词/托盘。
@@ -80,7 +80,7 @@
 
 ## 新会话建议顺序
 
-1. `git pull`，确认最新迭代构建（设置页 footer 的 `0.4.2+<hash>`）真机验证结果（重点：播放中最小化/恢复是否还卡 0.2s，日志里是否出现 `playback gap`；音质徽标是否只显示当前实际音质；播放页打开时标题栏搜索/设置是否直接可用）。
+1. `git pull`，确认 0.4.3（设置页 footer 的 `0.4.3+<hash>`）真机验证结果（重点：播放中最小化/恢复是否还卡 0.2s，日志里是否出现 `playback gap`；音质徽标是否只显示当前实际音质；播放页打开时标题栏搜索/设置是否直接可用）。
 2. 性能：先确认 OpenGL 是否启用，再定位具体卡顿页面。
 3. 发版必须走 GitHub Actions tag 流程，不要本地构建或手动上传。
 4. 每次改动保持：默认 OpenGL + 软件回退、便携数据目录、内存目标、中文 UI、Tauri 视觉参考。
