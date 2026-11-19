@@ -36,6 +36,7 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
 | `settings.json` | 音量、音质、主题、封面氛围、歌词翻译、性能模式 |
 | `last-playback.json` | 上次播放队列、索引和播放进度 |
 | `recent-played.json` | 本地最近播放历史（最多 200 首，和网易云历史合并） |
+| `home-cache.json` | 首页每日推荐缓存（按推荐日和账号，最多 30 个歌单） |
 | `playlist-state.json` | 歌单置顶 ID 与打开次数（资料库排序） |
 | `track-quality.json` | 单曲音质覆盖（按歌曲 ID） |
 | `log-level` | 日志级别 |

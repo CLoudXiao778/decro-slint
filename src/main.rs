@@ -2,6 +2,7 @@
 
 mod audio_buffer;
 mod auth;
+mod home_cache;
 mod libnetease;
 mod logger;
 mod media;
@@ -449,6 +450,15 @@ fn open_external_url(url: &str) -> bool {
     }
 }
 
+fn feature_index_for_today(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let mut hasher = DefaultHasher::new();
+    home_cache::today_key().hash(&mut hasher);
+    (hasher.finish() as usize) % len
+}
+
 fn color_for(id: &str) -> Color {
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
@@ -547,6 +557,7 @@ fn album_items_for_ui(items: &[netease::AlbumInfo]) -> Vec<PlaylistItem> {
 #[derive(Clone, Copy)]
 enum PlaylistTarget {
     Home,
+    RecommendAll,
     Library,
     Search,
     SearchArtists,
@@ -557,6 +568,7 @@ enum PlaylistTarget {
 fn playlist_model_for(ui: &AppWindow, target: PlaylistTarget) -> ModelRc<PlaylistItem> {
     match target {
         PlaylistTarget::Home => ui.get_playlists(),
+        PlaylistTarget::RecommendAll => ui.get_recommend_all(),
         PlaylistTarget::Library => ui.get_library_playlists(),
         PlaylistTarget::Search => ui.get_search_playlists(),
         PlaylistTarget::SearchArtists => ui.get_search_artists(),
@@ -576,7 +588,7 @@ async fn load_playlist_covers(
     let mut tasks = JoinSet::new();
     for (index, playlist) in playlists.into_iter().take(limit).enumerate() {
         let size = match target {
-            PlaylistTarget::Home | PlaylistTarget::Search => 256,
+            PlaylistTarget::Home | PlaylistTarget::RecommendAll | PlaylistTarget::Search => 256,
             PlaylistTarget::Library
             | PlaylistTarget::SearchArtists
             | PlaylistTarget::SearchAlbums
@@ -811,7 +823,7 @@ fn cover_buffer(path: &std::path::Path) -> Option<SharedPixelBuffer<Rgba8Pixel>>
 }
 
 static STATUS_GENERATION: AtomicU64 = AtomicU64::new(0);
-static LAST_HOME_LOAD: OnceLock<Mutex<Instant>> = OnceLock::new();
+static HOME_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WINDOW_RESTORED: AtomicBool = AtomicBool::new(false);
 static WINDOW_MINIMIZED: AtomicBool = AtomicBool::new(false);
 static WINDOW_BACKGROUNDED: AtomicBool = AtomicBool::new(false);
@@ -927,20 +939,6 @@ fn set_status_temp(ui: &AppWindow, message: String, duration: Duration) {
             }
         }
     });
-}
-
-fn home_refresh_due() -> bool {
-    LAST_HOME_LOAD
-        .get_or_init(|| {
-            Mutex::new(
-                Instant::now()
-                    .checked_sub(Duration::from_secs(3600))
-                    .unwrap_or_else(Instant::now),
-            )
-        })
-        .lock()
-        .map(|last| last.elapsed() >= Duration::from_secs(3600))
-        .unwrap_or(true)
 }
 
 fn switch_page(ui: &AppWindow, page: &str) {
@@ -2018,181 +2016,233 @@ fn load_home(
     ui: Weak<AppWindow>,
     catalog: Arc<Mutex<Catalog>>,
 ) {
+    let generation = HOME_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     runtime.spawn(async move {
         let epoch = state.session_epoch();
-        match netease::home_feed(&state).await {
-            Ok(mut home) => {
-                if state.session_epoch() != epoch {
-                    return;
-                }
-                if let Ok(mut last) = LAST_HOME_LOAD
-                    .get_or_init(|| Mutex::new(Instant::now()))
-                    .lock()
-                {
-                    *last = Instant::now();
-                }
-                let local = local_recent()
-                    .lock()
-                    .map(|list| list.clone())
-                    .unwrap_or_default();
-                home.recent = merge_recent(&local, &home.recent);
-                let home_error = home.error.clone();
-                if let Ok(mut catalog) = catalog.lock() {
-                    catalog.recent = home.recent.clone();
-                    catalog.daily = home.daily.clone();
-                    catalog.new_songs = home.new_songs.clone();
-                    catalog.playlists = home.recommended.clone();
-                }
-                let recent_covers = home.recent.clone();
-                let daily_covers = home.daily.clone();
-                let new_covers = home.new_songs.clone();
-                let recommended = home.recommended.clone();
-                let recommended_count = recommended.len();
-                let daily_first = home.daily.first().cloned();
-                let feature_dto = home.recommended.first().cloned();
-                let daily_first_cover = daily_first.clone();
-                let feature_cover = feature_dto.clone();
-                let daily_count = home.daily.len();
-                update_ui(&ui, move |ui| {
-                    ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(
-                        track_items_for_ui(&home.recent),
-                    ))));
-                    ui.set_daily_tracks(ModelRc::from(Rc::new(VecModel::from(
-                        track_items_for_ui(&home.daily),
-                    ))));
-                    ui.set_new_tracks(ModelRc::from(Rc::new(VecModel::from(track_items_for_ui(
-                        &home.new_songs,
-                    )))));
-                    ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(
-                        playlist_items_for_ui(&home.recommended),
-                    ))));
+        let account_id = state
+            .account()
+            .map(|account| account.user_id)
+            .unwrap_or_default();
+        let cached = home_cache::load();
+        let cached_today = cached
+            .as_ref()
+            .filter(|cache| cache.matches(&account_id))
+            .cloned();
 
-                    let daily_tint = daily_first
-                        .as_ref()
-                        .map(|track| color_for(&track.id))
-                        .unwrap_or_else(|| Color::from_rgb_u8(201, 32, 39));
-                    ui.set_daily_feature(PlaylistItem {
-                        id: "daily".into(),
-                        title: "每日推荐".into(),
-                        meta: if daily_count > 0 {
-                            format!("每天 6:00 更新 · {daily_count} 首").into()
-                        } else {
-                            "登录后同步每日推荐".into()
-                        },
-                        cover: Image::default(),
-                        tint: daily_tint,
-                        pinned: false,
-                    });
-                    if let Some(playlist) = &feature_dto {
-                        ui.set_feature_playlist(PlaylistItem {
-                            id: playlist.id.clone().into(),
-                            title: playlist.name.clone().into(),
-                            meta: format!("{} · {} 首", playlist.creator, playlist.track_count)
-                                .into(),
-                            cover: Image::default(),
-                            tint: color_for(&playlist.id),
-                            pinned: false,
-                        });
+        let mut home = if let Some(cache) = cached_today {
+            crate::logger::log(
+                "info",
+                "home",
+                &format!(
+                    "cache hit date={} recommended={}",
+                    cache.date,
+                    cache.recommended.len()
+                ),
+            );
+            cache.to_home_feed()
+        } else {
+            match netease::home_feed(&state).await {
+                Ok(home) => {
+                    if state.session_epoch() != epoch
+                        || HOME_GENERATION.load(Ordering::Relaxed) != generation
+                    {
+                        return;
                     }
-                    let _ = recommended_count;
-                    if let Some(error) = home_error {
-                        ui.set_status_text(error.into());
-                    } else if !ui.get_login_open() {
-                        ui.set_status_text("".into());
+                    home_cache::save(&home_cache::CachedHome::from_home(&account_id, &home));
+                    home
+                }
+                Err(error) => {
+                    // An older cache is still better than an empty home page.
+                    if let Some(cache) = cached
+                        .as_ref()
+                        .filter(|cache| cache.account_id == account_id)
+                    {
+                        crate::logger::log(
+                            "warn",
+                            "home",
+                            &format!("refresh failed, using cache date={}: {error}", cache.date),
+                        );
+                        let mut fallback = cache.to_home_feed();
+                        fallback.error = Some(format!("使用缓存：{error}"));
+                        fallback
+                    } else {
+                        if state.session_epoch() == epoch
+                            && HOME_GENERATION.load(Ordering::Relaxed) == generation
+                        {
+                            update_ui(&ui, move |ui| ui.set_status_text(error.into()));
+                        }
+                        return;
+                    }
+                }
+            }
+        };
+        if state.session_epoch() != epoch || HOME_GENERATION.load(Ordering::Relaxed) != generation {
+            return;
+        }
+
+        let local = local_recent()
+            .lock()
+            .map(|list| list.clone())
+            .unwrap_or_default();
+        home.recent = merge_recent(&local, &home.recent);
+        let home_error = home.error.clone();
+        if let Ok(mut catalog) = catalog.lock() {
+            catalog.recent = home.recent.clone();
+            catalog.daily = home.daily.clone();
+            catalog.new_songs = home.new_songs.clone();
+            catalog.playlists = home.recommended.clone();
+        }
+        let recent_covers = home.recent.clone();
+        let daily_covers = home.daily.clone();
+        let new_covers = home.new_songs.clone();
+        let recommend_all = home.recommended.clone();
+        let shelf: Vec<_> = recommend_all.iter().take(10).cloned().collect();
+        let shelf_items = playlist_items_for_ui(&shelf);
+        let recommend_all_items = playlist_items_for_ui(&recommend_all);
+        let daily_first = home.daily.first().cloned();
+        // Rotate the large "为你推荐" card through the daily recommendations
+        // (the first six are normally the account's daily picks).
+        let feature_dto = recommend_all
+            .get(feature_index_for_today(recommend_all.len().min(6)))
+            .cloned();
+        let daily_first_cover = daily_first.clone();
+        let feature_cover = feature_dto.clone();
+        let daily_count = home.daily.len();
+        update_ui(&ui, move |ui| {
+            ui.set_recent_tracks(ModelRc::from(Rc::new(VecModel::from(track_items_for_ui(
+                &home.recent,
+            )))));
+            ui.set_daily_tracks(ModelRc::from(Rc::new(VecModel::from(track_items_for_ui(
+                &home.daily,
+            )))));
+            ui.set_new_tracks(ModelRc::from(Rc::new(VecModel::from(track_items_for_ui(
+                &home.new_songs,
+            )))));
+            ui.set_playlists(ModelRc::from(Rc::new(VecModel::from(shelf_items))));
+            ui.set_recommend_all(ModelRc::from(Rc::new(VecModel::from(recommend_all_items))));
+
+            let daily_tint = daily_first
+                .as_ref()
+                .map(|track| color_for(&track.id))
+                .unwrap_or_else(|| Color::from_rgb_u8(201, 32, 39));
+            ui.set_daily_feature(PlaylistItem {
+                id: "daily".into(),
+                title: "每日推荐".into(),
+                meta: if daily_count > 0 {
+                    format!("每天 6:00 更新 · {daily_count} 首").into()
+                } else {
+                    "登录后同步每日推荐".into()
+                },
+                cover: Image::default(),
+                tint: daily_tint,
+                pinned: false,
+            });
+            if let Some(playlist) = &feature_dto {
+                ui.set_feature_playlist(PlaylistItem {
+                    id: playlist.id.clone().into(),
+                    title: playlist.name.clone().into(),
+                    meta: format!("{} · {} 首", playlist.creator, playlist.track_count).into(),
+                    cover: Image::default(),
+                    tint: color_for(&playlist.id),
+                    pinned: false,
+                });
+            }
+            if let Some(error) = home_error {
+                ui.set_status_text(error.into());
+            } else if !ui.get_login_open() {
+                ui.set_status_text("".into());
+            }
+        });
+
+        if let Some(track) = daily_first_cover {
+            let endpoint = cover_url(&track.cover_url, 500);
+            if !endpoint.is_empty() {
+                let cover_state = state.clone();
+                let cover_ui = ui.clone();
+                tokio::spawn(async move {
+                    if let Some(path) = tokio::time::timeout(
+                        Duration::from_secs(8),
+                        fetch_cover(&cover_state, endpoint),
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    {
+                        if cover_state.session_epoch() != epoch {
+                            return;
+                        }
+                        let image = tokio::task::spawn_blocking(move || cover_buffer(&path))
+                            .await
+                            .ok()
+                            .flatten();
+                        let Some(image) = image else { return };
+                        update_ui(&cover_ui, move |ui| {
+                            let mut item = ui.get_daily_feature();
+                            item.cover = Image::from_rgba8(image);
+                            ui.set_daily_feature(item);
+                        });
                     }
                 });
-
-                if let Some(track) = daily_first_cover {
-                    let endpoint = cover_url(&track.cover_url, 500);
-                    if !endpoint.is_empty() {
-                        let cover_state = state.clone();
-                        let cover_ui = ui.clone();
-                        tokio::spawn(async move {
-                            if let Some(path) = tokio::time::timeout(
-                                Duration::from_secs(8),
-                                fetch_cover(&cover_state, endpoint),
-                            )
-                            .await
-                            .ok()
-                            .flatten()
-                            {
-                                if cover_state.session_epoch() != epoch {
-                                    return;
-                                }
-                                let image =
-                                    tokio::task::spawn_blocking(move || cover_buffer(&path))
-                                        .await
-                                        .ok()
-                                        .flatten();
-                                let Some(image) = image else { return };
-                                update_ui(&cover_ui, move |ui| {
-                                    let mut item = ui.get_daily_feature();
-                                    item.cover = Image::from_rgba8(image);
-                                    ui.set_daily_feature(item);
-                                });
-                            }
-                        });
-                    }
-                }
-                if let Some(playlist) = feature_cover {
-                    let endpoint = cover_url(&playlist.cover_url, 500);
-                    if !endpoint.is_empty() {
-                        let cover_state = state.clone();
-                        let cover_ui = ui.clone();
-                        tokio::spawn(async move {
-                            if let Some(path) = tokio::time::timeout(
-                                Duration::from_secs(8),
-                                fetch_cover(&cover_state, endpoint),
-                            )
-                            .await
-                            .ok()
-                            .flatten()
-                            {
-                                if cover_state.session_epoch() != epoch {
-                                    return;
-                                }
-                                let image =
-                                    tokio::task::spawn_blocking(move || cover_buffer(&path))
-                                        .await
-                                        .ok()
-                                        .flatten();
-                                let Some(image) = image else { return };
-                                update_ui(&cover_ui, move |ui| {
-                                    let mut item = ui.get_feature_playlist();
-                                    item.cover = Image::from_rgba8(image);
-                                    ui.set_feature_playlist(item);
-                                });
-                            }
-                        });
-                    }
-                }
-                for (target, tracks, limit) in [
-                    (TrackTarget::Recent, recent_covers, 80usize),
-                    (TrackTarget::Daily, daily_covers, 80),
-                    (TrackTarget::New, new_covers, 40),
-                ] {
-                    tokio::spawn(load_track_covers(
-                        state.clone(),
-                        ui.clone(),
-                        target,
-                        tracks,
-                        limit,
-                    ));
-                }
-                tokio::spawn(load_playlist_covers(
-                    state.clone(),
-                    ui.clone(),
-                    PlaylistTarget::Home,
-                    recommended,
-                    12,
-                ));
-            }
-            Err(error) => {
-                if state.session_epoch() == epoch {
-                    update_ui(&ui, move |ui| ui.set_status_text(error.into()));
-                }
             }
         }
+        if let Some(playlist) = feature_cover {
+            let endpoint = cover_url(&playlist.cover_url, 500);
+            if !endpoint.is_empty() {
+                let cover_state = state.clone();
+                let cover_ui = ui.clone();
+                tokio::spawn(async move {
+                    if let Some(path) = tokio::time::timeout(
+                        Duration::from_secs(8),
+                        fetch_cover(&cover_state, endpoint),
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    {
+                        if cover_state.session_epoch() != epoch {
+                            return;
+                        }
+                        let image = tokio::task::spawn_blocking(move || cover_buffer(&path))
+                            .await
+                            .ok()
+                            .flatten();
+                        let Some(image) = image else { return };
+                        update_ui(&cover_ui, move |ui| {
+                            let mut item = ui.get_feature_playlist();
+                            item.cover = Image::from_rgba8(image);
+                            ui.set_feature_playlist(item);
+                        });
+                    }
+                });
+            }
+        }
+        for (target, tracks, limit) in [
+            (TrackTarget::Recent, recent_covers, 80usize),
+            (TrackTarget::Daily, daily_covers, 80),
+            (TrackTarget::New, new_covers, 40),
+        ] {
+            tokio::spawn(load_track_covers(
+                state.clone(),
+                ui.clone(),
+                target,
+                tracks,
+                limit,
+            ));
+        }
+        tokio::spawn(load_playlist_covers(
+            state.clone(),
+            ui.clone(),
+            PlaylistTarget::Home,
+            shelf,
+            10,
+        ));
+        tokio::spawn(load_playlist_covers(
+            state.clone(),
+            ui.clone(),
+            PlaylistTarget::RecommendAll,
+            recommend_all,
+            30,
+        ));
     });
 }
 
@@ -2428,9 +2478,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_log_level(log_level.into());
     {
         let weak = weak.clone();
-        let restore_runtime = runtime.clone();
-        let restore_state = state.clone();
-        let restore_catalog = catalog.clone();
         let restore_timer = Timer::default();
         restore_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
             let ui = weak.upgrade();
@@ -2452,14 +2499,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // restoring a minimized window on Windows. Changing a full-window
                     // overlay forces it to repaint every pixel.
                     ui.set_repaint_nudge(!ui.get_repaint_nudge());
-                    if ui.get_page() == "home" && !ui.get_login_open() && home_refresh_due() {
-                        load_home(
-                            &restore_runtime,
-                            restore_state.clone(),
-                            weak.clone(),
-                            restore_catalog.clone(),
-                        );
-                    }
                 }
                 memory::log_stats("restored", "info");
             }
@@ -2485,27 +2524,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
-    }
-
-    // Daily recommendations must not stay frozen in a window that remains
-    // open for days. Check at most once an hour while the home page is
-    // visible; restoring from minimize also triggers a due refresh.
-    {
-        let runtime = runtime.clone();
-        let state = state.clone();
-        let weak = weak.clone();
-        let catalog = catalog.clone();
-        let refresh_timer = Timer::default();
-        refresh_timer.start(TimerMode::Repeated, Duration::from_secs(600), move || {
-            let Some(ui) = weak.upgrade() else { return };
-            if ui.get_page() != "home" || ui.get_login_open() || ui.get_window_minimized() {
-                return;
-            }
-            if home_refresh_due() {
-                load_home(&runtime, state.clone(), weak.clone(), catalog.clone());
-            }
-        });
-        std::mem::forget(refresh_timer);
     }
 
     ui.set_status_text("正在检查登录状态…".into());
@@ -2793,6 +2811,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             runtime.spawn(async move {
                 player_anim.fetch_add(1, Ordering::Relaxed);
                 let logout_result = auth::logout(&state).await;
+                home_cache::clear();
                 let request = generation.fetch_add(1, Ordering::Relaxed) + 1;
                 search_generation.fetch_add(1, Ordering::Relaxed);
                 detail_generation.fetch_add(1, Ordering::Relaxed);

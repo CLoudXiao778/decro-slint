@@ -80,6 +80,7 @@ extern "C" {
     fn jmap_free(map: *mut Jmap);
     fn ne_album_detail(id: *const c_char) -> *mut NeResp;
     fn ne_recommend_resource() -> *mut NeResp;
+    fn ne_recommend_songs() -> *mut NeResp;
     fn ne_playlist_subscribe(id: *const c_char, t: *const c_char) -> *mut NeResp;
     fn ne_playlist_create(name: *const c_char, privacy: *const c_char) -> *mut NeResp;
     fn ne_resp_free(resp: *mut NeResp);
@@ -436,6 +437,12 @@ pub fn recommend_resource() -> Result<Value, String> {
     init();
     let resp = unsafe { ne_recommend_resource() };
     response_json(resp, "每日推荐歌单")
+}
+
+pub fn recommend_songs() -> Result<Value, String> {
+    init();
+    let resp = unsafe { ne_recommend_songs() };
+    response_json(resp, "每日推荐歌曲")
 }
 
 pub fn playlist_subscribe(id: &str, subscribe: bool) -> Result<(), String> {

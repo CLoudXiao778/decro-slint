@@ -21,7 +21,7 @@ pub struct TrackDto {
     pub quality: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistDto {
     pub id: String,
@@ -608,25 +608,45 @@ pub async fn recent_played(state: &AppState) -> Result<Vec<TrackDto>, String> {
     Ok(list)
 }
 
+async fn daily_recommend_songs(state: &AppState) -> Result<Value, String> {
+    if state.account().is_some() {
+        match tokio::task::spawn_blocking(crate::libnetease::recommend_songs).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => {
+                crate::logger::log("warn", "home", &format!("daily songs failed: {error}"));
+            }
+            Err(error) => {
+                crate::logger::log("warn", "home", &format!("daily songs task failed: {error}"));
+            }
+        }
+    }
+    let query = [("limit", "30".to_string())];
+    get_json(state, "/api/v3/discovery/recommend/songs", &query).await
+}
+
 pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
-    let recommended_query = [("limit", "12".to_string())];
+    let generic_query = [("limit", "30".to_string())];
     let new_songs_query = [("limit", "12".to_string())];
     let logged_in = state.account().is_some();
+
     // Logged-in users get the account's daily "推荐歌单" from the weapi
-    // discovery endpoint. The public /api/personalized/playlist endpoint is
-    // not personalized and can return the same generic list for days.
+    // discovery endpoint. That endpoint usually returns six cards, so fill the
+    // rest of the home shelf and the "more" page from the public list.
     let recommended_task = async {
+        let mut list = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
         if logged_in {
             match tokio::task::spawn_blocking(crate::libnetease::recommend_resource).await {
                 Ok(Ok(value)) => {
-                    let mut list = playlists_from(value.get("recommend"));
-                    if list.is_empty() {
-                        list = playlists_from(value.get("result"));
+                    for playlist in playlists_from(value.get("recommend"))
+                        .into_iter()
+                        .chain(playlists_from(value.get("result")))
+                    {
+                        if seen.insert(playlist.id.clone()) {
+                            list.push(playlist);
+                        }
                     }
-                    if !list.is_empty() {
-                        return Ok(value);
-                    }
-                    crate::logger::log("warn", "home", "daily recommend resource was empty");
                 }
                 Ok(Err(error)) => {
                     crate::logger::log(
@@ -644,26 +664,48 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
                 }
             }
         }
-        get_json(state, "/api/personalized/playlist", &recommended_query).await
+
+        match get_json(state, "/api/personalized/playlist", &generic_query).await {
+            Ok(value) => {
+                for playlist in playlists_from(value.get("result")) {
+                    if seen.insert(playlist.id.clone()) {
+                        list.push(playlist);
+                    }
+                }
+            }
+            Err(error) => {
+                if list.is_empty() {
+                    return Err(format!("推荐歌单：{error}"));
+                }
+                crate::logger::log(
+                    "warn",
+                    "home",
+                    &format!("generic recommendations failed: {error}"),
+                );
+            }
+        }
+
+        list.truncate(30);
+        if list.is_empty() {
+            return Err("推荐歌单：网易云没有返回歌单".to_string());
+        }
+        Ok(list)
     };
-    let (recommended_json, new_songs_json) = tokio::join!(
+
+    let (recommended_result, new_songs_result) = tokio::join!(
         recommended_task,
         get_json(state, "/api/personalized/newsong", &new_songs_query),
     );
-    if recommended_json.is_err() && new_songs_json.is_err() {
-        return Err(recommended_json
+    if recommended_result.is_err() && new_songs_result.is_err() {
+        return Err(recommended_result
             .err()
-            .or_else(|| new_songs_json.err())
+            .or_else(|| new_songs_result.err())
             .unwrap_or_else(|| "首页加载失败".to_string()));
     }
 
     let mut errors = Vec::new();
-    let recommended = match recommended_json {
-        Ok(value) => {
-            let mut list = playlists_from(value.get("recommend"));
-            if list.is_empty() {
-                list = playlists_from(value.get("result"));
-            }
+    let recommended = match recommended_result {
+        Ok(list) => {
             crate::logger::log(
                 "info",
                 "home",
@@ -678,11 +720,11 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
             list
         }
         Err(error) => {
-            errors.push(format!("推荐歌单：{error}"));
+            errors.push(error);
             Vec::new()
         }
     };
-    let new_songs = match new_songs_json {
+    let new_songs = match new_songs_result {
         Ok(value) => value
             .get("result")
             .and_then(Value::as_array)
@@ -704,14 +746,25 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
     let mut recent = Vec::new();
 
     if state.account().is_some() {
-        let daily_query = [("limit", "30".to_string())];
-        let (daily_result, recent_result) = tokio::join!(
-            get_json(state, "/api/v3/discovery/recommend/songs", &daily_query,),
-            recent_played(state),
-        );
+        let (daily_result, recent_result) =
+            tokio::join!(daily_recommend_songs(state), recent_played(state),);
 
         match daily_result {
-            Ok(value) => daily = parse_daily(&value),
+            Ok(value) => {
+                daily = parse_daily(&value);
+                crate::logger::log(
+                    "info",
+                    "home",
+                    &format!(
+                        "daily count={} first={}",
+                        daily.len(),
+                        daily
+                            .first()
+                            .map(|track| format!("{}:{}", track.id, track.name))
+                            .unwrap_or_else(|| "-".to_string())
+                    ),
+                );
+            }
             Err(error) => errors.push(format!("每日推荐：{error}")),
         }
         match recent_result {
