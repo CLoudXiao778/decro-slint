@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::netease::{HomeFeed, PlaylistDto, TrackDto};
 
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -813,6 +813,26 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
                 .cloned();
         }
 
+        // The daily recommendation card is a marketing snapshot: its title,
+        // cover and track count can differ from the actual playlist. Resolve
+        // the hero through the playlist detail endpoint so the home card and
+        // the detail page show the same name, cover and song count.
+        if let Some(feature_playlist) = feature.clone() {
+            match playlist_detail(state, feature_playlist.id.clone()).await {
+                Ok(mut detail) => {
+                    detail.tracks.clear();
+                    feature = Some(detail);
+                }
+                Err(error) => {
+                    crate::logger::log(
+                        "warn",
+                        "home",
+                        &format!("feature playlist detail failed: {error}"),
+                    );
+                }
+            }
+        }
+
         if let Some(fixed) = daily_playlists
             .iter()
             .find(|playlist| {
