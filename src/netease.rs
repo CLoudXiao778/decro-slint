@@ -41,6 +41,8 @@ pub struct PlaylistDto {
 #[serde(rename_all = "camelCase")]
 pub struct HomeFeed {
     pub recommended: Vec<PlaylistDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feature: Option<PlaylistDto>,
     pub new_songs: Vec<TrackDto>,
     pub daily: Vec<TrackDto>,
     pub recent: Vec<TrackDto>,
@@ -636,6 +638,17 @@ fn push_playlist_unique(
     }
 }
 
+fn is_official_radar(playlist: &PlaylistDto) -> bool {
+    let creator = playlist.creator.to_ascii_lowercase();
+    creator.contains("云音乐") || creator.contains("网易") || creator.contains("netease")
+}
+
+/// The official private radar is a daily mix (tens of tracks). A same-named
+/// user playlist with hundreds of tracks must never become the hero card.
+fn is_plausible_radar(playlist: &PlaylistDto) -> bool {
+    playlist.track_count <= 200
+}
+
 fn clean_search_name(name: &str) -> String {
     name.replace("<em>", "")
         .replace("</em>", "")
@@ -712,8 +725,9 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
 
     // The shelf is intentionally not built from the old public
     // /api/personalized/playlist stream. It starts with the fixed
-    // "欧美私人雷达" playlist, keeps the account's "私人雷达" for the hero card,
-    // and fills the rest with a random page from the playlist square.
+    // "欧美私人雷达" playlist and fills the rest with a random page from the
+    // playlist square. The large hero card is a separate official "私人雷达"
+    // entry, never an arbitrary user playlist with the same name.
     let recommended_task = async {
         let radar = match search_radar_playlists(state).await {
             Ok(list) => list,
@@ -726,61 +740,110 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
         let mut ids = std::collections::HashSet::new();
         let mut names = std::collections::HashSet::new();
 
-        if let Some(fixed) = radar
+        let fixed = radar
             .iter()
-            .find(|playlist| playlist.name.contains("欧美私人雷达"))
-            .cloned()
-        {
-            push_playlist_unique(&mut list, &mut ids, &mut names, fixed);
-        }
-        if let Some(hero) = radar
-            .iter()
-            .find(|playlist| playlist.name.trim() == "私人雷达")
-            .or_else(|| {
-                radar.iter().find(|playlist| {
-                    playlist.name.contains("私人雷达") && !playlist.name.contains("欧美私人雷达")
-                })
+            .find(|playlist| {
+                playlist.name.contains("欧美私人雷达")
+                    && is_official_radar(playlist)
+                    && is_plausible_radar(playlist)
             })
-            .cloned()
-        {
-            push_playlist_unique(&mut list, &mut ids, &mut names, hero);
+            .cloned();
+        if let Some(fixed) = fixed {
+            push_playlist_unique(&mut list, &mut ids, &mut names, fixed);
         }
         for playlist in random_playlists().await {
             push_playlist_unique(&mut list, &mut ids, &mut names, playlist);
         }
 
-        let has_hero = list
-            .iter()
-            .any(|playlist| playlist.name.trim() == "私人雷达");
-        if logged_in && (!has_hero || list.len() < 10) {
+        let mut daily_playlists = Vec::new();
+        let mut feature = None;
+        if logged_in {
             match tokio::task::spawn_blocking(crate::libnetease::recommend_resource).await {
                 Ok(Ok(value)) => {
-                    for playlist in playlists_from(value.get("recommend"))
+                    daily_playlists = playlists_from(value.get("recommend"))
                         .into_iter()
                         .chain(playlists_from(value.get("result")))
-                    {
-                        push_playlist_unique(&mut list, &mut ids, &mut names, playlist);
-                    }
+                        .collect();
+                    feature = daily_playlists
+                        .iter()
+                        .find(|playlist| {
+                            playlist.name.trim() == "私人雷达"
+                                && is_official_radar(playlist)
+                                && is_plausible_radar(playlist)
+                        })
+                        .or_else(|| {
+                            daily_playlists.iter().find(|playlist| {
+                                playlist.name.contains("私人雷达")
+                                    && is_official_radar(playlist)
+                                    && is_plausible_radar(playlist)
+                                    && !playlist.name.contains("欧美私人雷达")
+                            })
+                        })
+                        .cloned();
                 }
                 Ok(Err(error)) => {
-                    crate::logger::log(
-                        "warn",
-                        "home",
-                        &format!("radar fallback resource failed: {error}"),
-                    );
+                    crate::logger::log("warn", "home", &format!("daily resource failed: {error}"));
                 }
                 Err(error) => {
                     crate::logger::log(
                         "warn",
                         "home",
-                        &format!("radar fallback resource task failed: {error}"),
+                        &format!("daily resource task failed: {error}"),
                     );
                 }
             }
         }
 
-        // The fixed playlist must be the first shelf item even when it came
-        // from the random page or the daily fallback.
+        if feature.is_none() {
+            feature = radar
+                .iter()
+                .find(|playlist| {
+                    playlist.name.trim() == "私人雷达"
+                        && is_official_radar(playlist)
+                        && is_plausible_radar(playlist)
+                })
+                .or_else(|| {
+                    radar.iter().find(|playlist| {
+                        playlist.name.contains("私人雷达")
+                            && is_official_radar(playlist)
+                            && is_plausible_radar(playlist)
+                            && !playlist.name.contains("欧美私人雷达")
+                    })
+                })
+                .cloned();
+        }
+
+        if let Some(fixed) = daily_playlists
+            .iter()
+            .find(|playlist| {
+                playlist.name.contains("欧美私人雷达")
+                    && is_official_radar(playlist)
+                    && is_plausible_radar(playlist)
+            })
+            .cloned()
+        {
+            // A search result with the same name but a user creator must not
+            // occupy the fixed first slot.
+            list.retain(|playlist| {
+                !(playlist.name.contains("欧美私人雷达") && !is_official_radar(playlist))
+            });
+            push_playlist_unique(&mut list, &mut ids, &mut names, fixed);
+        }
+
+        if list.len() < 10 {
+            for playlist in daily_playlists {
+                if playlist.name.contains("欧美私人雷达") && !is_plausible_radar(&playlist) {
+                    continue;
+                }
+                push_playlist_unique(&mut list, &mut ids, &mut names, playlist);
+            }
+        }
+
+        // Never allow a same-named user playlist with hundreds of tracks to
+        // occupy the fixed "欧美私人雷达" slot.
+        list.retain(|playlist| {
+            !(playlist.name.contains("欧美私人雷达") && !is_plausible_radar(playlist))
+        });
         if let Some(index) = list
             .iter()
             .position(|playlist| playlist.name.contains("欧美私人雷达"))
@@ -791,11 +854,31 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
             }
         }
 
+        // Never let a user-created playlist named "私人雷达" appear in the
+        // shelf or the "more" list; the hero is shown separately.
+        if let Some(feature) = &feature {
+            let feature_name = feature.name.trim().to_string();
+            list.retain(|playlist| {
+                playlist.id != feature.id && playlist.name.trim() != feature_name
+            });
+        }
+        list.retain(|playlist| playlist.name.trim() != "私人雷达");
+
         list.truncate(30);
-        if list.is_empty() {
+        if let Some(index) = list
+            .iter()
+            .position(|playlist| playlist.name.contains("欧美私人雷达"))
+        {
+            if index > 0 {
+                let fixed = list.remove(index);
+                list.insert(0, fixed);
+            }
+        }
+
+        if list.is_empty() && feature.is_none() {
             return Err("推荐歌单：没有获取到歌单".to_string());
         }
-        Ok(list)
+        Ok((list, feature))
     };
 
     let (recommended_result, new_songs_result) = tokio::join!(
@@ -810,24 +893,28 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
     }
 
     let mut errors = Vec::new();
-    let recommended = match recommended_result {
-        Ok(list) => {
+    let (recommended, feature) = match recommended_result {
+        Ok((list, feature)) => {
             crate::logger::log(
                 "info",
                 "home",
                 &format!(
-                    "recommended count={} first={}",
+                    "recommended count={} first={} feature={}",
                     list.len(),
                     list.first()
+                        .map(|playlist| format!("{}:{}", playlist.id, playlist.name))
+                        .unwrap_or_else(|| "-".to_string()),
+                    feature
+                        .as_ref()
                         .map(|playlist| format!("{}:{}", playlist.id, playlist.name))
                         .unwrap_or_else(|| "-".to_string())
                 ),
             );
-            list
+            (list, feature)
         }
         Err(error) => {
             errors.push(error);
-            Vec::new()
+            (Vec::new(), None)
         }
     };
     let new_songs = match new_songs_result {
@@ -881,6 +968,7 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
 
     Ok(HomeFeed {
         recommended,
+        feature,
         new_songs,
         daily,
         recent,

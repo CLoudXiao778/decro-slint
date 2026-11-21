@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::netease::{HomeFeed, PlaylistDto, TrackDto};
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +23,8 @@ pub struct CachedHome {
     pub date: String,
     pub account_id: String,
     pub recommended: Vec<PlaylistDto>,
+    #[serde(default)]
+    pub feature: Option<PlaylistDto>,
     pub daily: Vec<TrackDto>,
     pub new_songs: Vec<TrackDto>,
 }
@@ -34,6 +36,7 @@ impl CachedHome {
             date: today_key(),
             account_id: account_id.to_string(),
             recommended: home.recommended.clone(),
+            feature: home.feature.clone(),
             daily: home.daily.clone(),
             new_songs: home.new_songs.clone(),
         }
@@ -46,6 +49,7 @@ impl CachedHome {
     pub fn to_home_feed(&self) -> HomeFeed {
         HomeFeed {
             recommended: self.recommended.clone(),
+            feature: self.feature.clone(),
             new_songs: self.new_songs.clone(),
             daily: self.daily.clone(),
             recent: Vec::new(),

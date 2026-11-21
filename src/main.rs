@@ -2206,19 +2206,9 @@ fn load_home(
         let recent_covers = home.recent.clone();
         let daily_covers = home.daily.clone();
         let new_covers = home.new_songs.clone();
-        // The right hero card is the radar playlist; keep it out of the
-        // recommendation shelf so the same playlist never appears twice.
-        let feature_dto = home
-            .recommended
-            .iter()
-            .find(|playlist| playlist.name.trim() == "私人雷达")
-            .or_else(|| {
-                home.recommended.iter().find(|playlist| {
-                    playlist.name.contains("私人雷达") && !playlist.name.contains("欧美私人雷达")
-                })
-            })
-            .or_else(|| home.recommended.first())
-            .cloned();
+        // The right hero card comes from the official daily resource only.
+        // Never fall back to an arbitrary search result named "私人雷达".
+        let feature_dto = home.feature.clone();
         let mut recommend_all = home.recommended.clone();
         if let Some(feature) = &feature_dto {
             let feature_name = feature.name.trim().to_string();
@@ -2226,6 +2216,7 @@ fn load_home(
                 playlist.id != feature.id && playlist.name.trim() != feature_name
             });
         }
+        recommend_all.retain(|playlist| playlist.name.trim() != "私人雷达");
         let shelf: Vec<_> = recommend_all.iter().take(10).cloned().collect();
         let shelf_for_ui = shelf.clone();
         let recommend_all_for_ui = recommend_all.clone();
