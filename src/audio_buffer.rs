@@ -151,24 +151,33 @@ impl PrefetchSource {
             silence_left: 0,
         }
     }
+}
 
-    /// Emit one full frame of silence. Partial frames would shift the
-    /// interleaved L/R sample stream and permanently swap channels.
-    fn silence_sample(&mut self) -> i16 {
-        if self.silence_left == 0 {
-            self.silence_left = self.channels.max(1) as usize;
-        }
-        self.silence_left -= 1;
-        0
+/// Emit one full frame of silence. Partial frames would shift the
+/// interleaved L/R sample stream and permanently swap channels.
+fn take_silence(silence_left: &mut usize, channels: u16) -> i16 {
+    if *silence_left == 0 {
+        *silence_left = channels.max(1) as usize;
     }
+    *silence_left -= 1;
+    0
 }
 
 impl Iterator for PrefetchSource {
     type Item = i16;
 
     fn next(&mut self) -> Option<i16> {
-        if self.silence_left > 0 {
-            self.silence_left -= 1;
+        let mut silence_left = self.silence_left;
+        let result = self.next_with_silence(&mut silence_left);
+        self.silence_left = silence_left;
+        result
+    }
+}
+
+impl PrefetchSource {
+    fn next_with_silence(&mut self, silence_left: &mut usize) -> Option<i16> {
+        if *silence_left > 0 {
+            *silence_left -= 1;
             return Some(0);
         }
         if self.chunk_pos < self.chunk.len() {
@@ -181,7 +190,9 @@ impl Iterator for PrefetchSource {
         let mut state = match locked {
             Ok(state) => state,
             // Never block the real-time output thread on the decoder thread.
-            Err(TryLockError::WouldBlock) => return Some(self.silence_sample()),
+            Err(TryLockError::WouldBlock) => {
+                return Some(take_silence(silence_left, self.channels))
+            }
             Err(TryLockError::Poisoned(_)) => return None,
         };
         if state.samples.is_empty() {
@@ -196,14 +207,14 @@ impl Iterator for PrefetchSource {
                 self.underrun_logged = true;
                 crate::logger::log("warn", "audio", "prefetch underrun: buffer empty");
             }
-            return Some(self.silence_sample());
+            return Some(take_silence(silence_left, self.channels));
         }
 
         let take = state.samples.len().min(CHUNK_SAMPLES);
         self.chunk.clear();
         self.chunk.extend(state.samples.drain(..take));
         self.chunk_pos = 1;
-        self.silence_left = 0;
+        *silence_left = 0;
         self.seeking = false;
         self.underrun_logged = false;
         self.chunk.first().copied()
