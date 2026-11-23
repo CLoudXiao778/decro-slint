@@ -147,7 +147,7 @@ fn build_output_stream<T>(
 where
     T: rodio::cpal::SizedSample + rodio::cpal::FromSample<f32> + Send + 'static,
 {
-    use rodio::cpal::Sample as _;
+    use rodio::cpal::traits::DeviceTrait;
 
     #[cfg(windows)]
     let mut mmcss: Option<MmcssGuard> = None;
@@ -226,7 +226,7 @@ fn open_audio_output() -> Result<(rodio::Sink, AudioOutput, String), String> {
         buffer_size,
     };
     let (sink, queue_rx) = rodio::Sink::new_idle();
-    let (mixer, mut mixer_rx) = rodio::dynamic_mixer::mixer::<f32>(channels, sample_rate);
+    let (mixer, mixer_rx) = rodio::dynamic_mixer::mixer::<f32>(channels, sample_rate);
     mixer.add(queue_rx);
     let stream = match sample_format {
         cpal::SampleFormat::F32 => build_output_stream::<f32>(&device, &config, mixer_rx),

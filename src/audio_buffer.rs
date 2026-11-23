@@ -177,7 +177,8 @@ impl Iterator for PrefetchSource {
             return Some(sample);
         }
 
-        let mut state = match self.shared.state.try_lock() {
+        let locked = self.shared.state.try_lock();
+        let mut state = match locked {
             Ok(state) => state,
             // Never block the real-time output thread on the decoder thread.
             Err(TryLockError::WouldBlock) => return Some(self.silence_sample()),
