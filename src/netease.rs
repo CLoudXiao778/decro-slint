@@ -171,13 +171,36 @@ async fn get_json(state: &AppState, path: &str, query: &[(&str, String)]) -> Res
         .get(format!("{API_BASE}{path}"))
         .query(query)
         .header(reqwest::header::REFERER, format!("{API_BASE}/"));
-    if let Some(cookies) = state.cookie_header() {
+    // The C jar also receives Set-Cookie updates from weapi calls, so prefer
+    // it when present to keep direct requests in sync with the login session.
+    let jar_cookies = crate::libnetease::cookie_header();
+    let cookies = if !jar_cookies.trim().is_empty() {
+        Some(jar_cookies)
+    } else {
+        state.cookie_header()
+    };
+    if let Some(cookies) = cookies {
         request = request.header(reqwest::header::COOKIE, cookies);
     }
     let response = request
         .send()
         .await
         .map_err(|e| format!("网易云请求失败: {e}"))?;
+    let set_cookies = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !set_cookies.is_empty() {
+        state.merge_set_cookie(&set_cookies);
+        if let Some(merged) = state.cookie_header() {
+            crate::libnetease::merge_cookies(&merged);
+        }
+        crate::auth::persist_state_cookies(state);
+    }
     if !response.status().is_success() {
         return Err(format!("网易云接口返回 HTTP {}", response.status()));
     }
@@ -818,9 +841,18 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
         // the hero through the playlist detail endpoint so the home card and
         // the detail page show the same name, cover and song count.
         if let Some(feature_playlist) = feature.clone() {
-            match playlist_detail(state, feature_playlist.id.clone()).await {
+            match fetch_playlist_meta(state, &feature_playlist.id).await {
                 Ok(mut detail) => {
-                    detail.tracks.clear();
+                    if detail.track_count == 0 {
+                        // Some endpoints omit trackCount with n=0; fall back to
+                        // the full detail once and discard the track list.
+                        if let Ok(mut full) =
+                            fetch_playlist_detail(state, &feature_playlist.id).await
+                        {
+                            full.tracks.clear();
+                            detail = full;
+                        }
+                    }
                     feature = Some(detail);
                 }
                 Err(error) => {
@@ -998,6 +1030,25 @@ pub async fn home_feed(state: &AppState) -> Result<HomeFeed, String> {
             Some(errors.join("；"))
         },
     })
+}
+
+async fn fetch_playlist_meta(state: &AppState, id: &str) -> Result<PlaylistDto, String> {
+    // n=0 returns playlist metadata + track IDs without downloading every
+    // track, which is all the hero card needs.
+    let value = get_json(
+        state,
+        "/api/v6/playlist/detail",
+        &[
+            ("id", id.to_string()),
+            ("n", "0".to_string()),
+            ("s", "8".to_string()),
+        ],
+    )
+    .await?;
+    value
+        .get("playlist")
+        .and_then(normalize_playlist)
+        .ok_or_else(|| "歌单不存在、已下架或不可访问".to_string())
 }
 
 async fn fetch_playlist_detail(state: &AppState, id: &str) -> Result<PlaylistDto, String> {

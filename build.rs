@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rustc-env=DECRO_GIT_HASH={}", git_short_hash());
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/heads");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 
     let sources = [
         "c_shim.c",
@@ -42,6 +43,7 @@ fn main() {
         build.define("_GNU_SOURCE", None);
     }
     build.compile("netease");
+    println!("cargo:rerun-if-changed=c_shim.c");
     println!("cargo:rerun-if-changed=vendor/libnetease/include");
     println!("cargo:rerun-if-changed=vendor/libnetease/src");
 

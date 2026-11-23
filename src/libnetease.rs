@@ -100,6 +100,7 @@ static TRANSPORT: NeHttpTransport = NeHttpTransport {
 static INIT: OnceLock<()> = OnceLock::new();
 static CRYPTO_LOCK: Mutex<()> = Mutex::new(());
 static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+static PENDING_SET_COOKIES: Mutex<Option<String>> = Mutex::new(None);
 
 fn cstring(value: &str) -> CString {
     CString::new(value).unwrap_or_else(|_| CString::new("").expect("empty CString"))
@@ -161,6 +162,25 @@ pub fn cookie_header() -> String {
         let ptr = ne_global_cookie_header();
         take_c_string(ptr)
     }
+}
+
+fn note_set_cookies(value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    if let Ok(mut slot) = PENDING_SET_COOKIES.lock() {
+        let entry = slot.get_or_insert_with(String::new);
+        if !entry.is_empty() {
+            entry.push('\n');
+        }
+        entry.push_str(value);
+    }
+}
+
+/// Take `Set-Cookie` lines observed by the C transport so the Rust layer can
+/// keep its own cookie jar and DPAPI file in sync.
+pub fn take_pending_set_cookies() -> Option<String> {
+    PENDING_SET_COOKIES.lock().ok()?.take()
 }
 
 fn cookie_pairs(header: &str) -> Vec<(String, String)> {
@@ -743,6 +763,7 @@ unsafe fn transport_impl(
                 .filter(|value| !value.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n");
+            note_set_cookies(&set_cookies);
             match response.bytes() {
                 Ok(bytes) => make_response(
                     status,

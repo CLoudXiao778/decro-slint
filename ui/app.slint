@@ -1223,7 +1223,13 @@ export component AppWindow inherits Window {
                     icon-size: 16px;
                     width: 28px;
                     height: 28px;
-                    clicked => { root.nav("home"); }
+                    clicked => {
+                        if root.page == "detail" {
+                            root.back-detail();
+                        } else if root.page != "home" {
+                            root.nav("home");
+                        }
+                    }
                 }
                 IconButton {
                     icon: root.dark-mode ? @image-url("../assets/icons/moon.svg") : @image-url("../assets/icons/sun.svg");
@@ -1799,11 +1805,31 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 8px;
-                            PillButton { label: "歌曲"; width: 84px; primary: root.search-kind == "song"; clicked => { root.search-kind = "song"; } }
-                            PillButton { label: "歌单"; width: 84px; primary: root.search-kind == "playlist"; clicked => { root.search-kind = "playlist"; } }
-                            PillButton { label: "歌手"; width: 84px; primary: root.search-kind == "artist"; clicked => { root.search-kind = "artist"; } }
-                            PillButton { label: "专辑"; width: 84px; primary: root.search-kind == "album"; clicked => { root.search-kind = "album"; } }
-                            PillButton { label: "歌词"; width: 84px; primary: root.search-kind == "lyric"; clicked => { root.search-kind = "lyric"; } }
+                            PillButton { label: "歌曲"; width: 84px; primary: root.search-kind == "song";
+                            clicked => {
+                                root.search-kind = "song";
+                                if !root.search-text.is-empty && root.search-query != root.search-text { root.search(root.search-text, "song"); }
+                            } }
+                            PillButton { label: "歌单"; width: 84px; primary: root.search-kind == "playlist";
+                            clicked => {
+                                root.search-kind = "playlist";
+                                if !root.search-text.is-empty && root.search-query != root.search-text { root.search(root.search-text, "playlist"); }
+                            } }
+                            PillButton { label: "歌手"; width: 84px; primary: root.search-kind == "artist";
+                            clicked => {
+                                root.search-kind = "artist";
+                                if !root.search-text.is-empty && root.search-query != root.search-text { root.search(root.search-text, "artist"); }
+                            } }
+                            PillButton { label: "专辑"; width: 84px; primary: root.search-kind == "album";
+                            clicked => {
+                                root.search-kind = "album";
+                                if !root.search-text.is-empty && root.search-query != root.search-text { root.search(root.search-text, "album"); }
+                            } }
+                            PillButton { label: "歌词"; width: 84px; primary: root.search-kind == "lyric";
+                            clicked => {
+                                root.search-kind = "lyric";
+                                if !root.search-text.is-empty && !root.search-loading { root.search(root.search-text, "lyric"); }
+                            } }
                         }
 
                         if root.search-text.is-empty : Text {
@@ -2286,7 +2312,7 @@ export component AppWindow inherits Window {
                                     toggled(value) => { root.set-low-power(value); }
                                 }
 
-                                Text { text: "播放音质（下一首生效）"; color: Theme.muted; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
+                                Text { text: "播放音质（切换后立即重载当前曲）"; color: Theme.muted; font-size: 11px; font-weight: 650; letter-spacing: 1px; }
                                 HorizontalLayout {
                                     spacing: 8px;
                                     PillButton { label: "自动"; primary: root.quality == "auto"; clicked => { root.set-quality("auto"); } }

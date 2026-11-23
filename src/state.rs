@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,52 @@ impl AppState {
             qr_poll_lock: Arc::new(tokio::sync::Mutex::new(())),
             api,
             stream,
+        }
+    }
+
+    /// Merge raw `Set-Cookie` header lines into the cookie jar used by direct
+    /// reqwest calls. Expired cookies remove the previous value.
+    pub fn merge_set_cookie(&self, raw: &str) {
+        let mut jar = BTreeMap::new();
+        if let Some(current) = self.cookie_header() {
+            for part in current.split(';') {
+                if let Some((name, value)) = part.trim().split_once('=') {
+                    if !name.trim().is_empty() && !value.trim().is_empty() {
+                        jar.insert(name.trim().to_string(), value.trim().to_string());
+                    }
+                }
+            }
+        }
+        for line in raw.lines() {
+            let Some(pair) = line.split(';').next() else {
+                continue;
+            };
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            let value = value.trim();
+            let lower = line.to_ascii_lowercase();
+            let expired = name.is_empty()
+                || value.is_empty()
+                || lower.contains("max-age=0")
+                || lower.contains("expires=thu, 01 jan 1970");
+            if expired {
+                jar.remove(name);
+            } else {
+                jar.insert(name.to_string(), value.to_string());
+            }
+        }
+        if jar.is_empty() {
+            return;
+        }
+        let merged = jar
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if let Ok(mut slot) = self.cookies.lock() {
+            *slot = Some(merged);
         }
     }
 

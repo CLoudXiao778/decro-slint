@@ -457,6 +457,13 @@ pub async fn logout(state: &AppState) -> Result<(), String> {
     file_result
 }
 
+/// Persist the current session cookies after a server-side rotation.
+pub fn persist_state_cookies(state: &AppState) {
+    if let Some(cookies) = state.cookie_header() {
+        let _ = save_cookies(&cookies);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_cookie_input;

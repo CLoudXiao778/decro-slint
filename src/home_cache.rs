@@ -74,7 +74,13 @@ pub fn load() -> Option<CachedHome> {
 
 pub fn save(cache: &CachedHome) {
     if let Ok(text) = serde_json::to_string(cache) {
-        let _ = fs::write(cache_path(), text);
+        let path = cache_path();
+        let temporary = path.with_extension(format!("json.tmp.{}", rand::random::<u64>()));
+        if fs::write(&temporary, &text).is_ok() {
+            if fs::rename(&temporary, &path).is_err() {
+                let _ = fs::remove_file(&temporary);
+            }
+        }
     }
 }
 
