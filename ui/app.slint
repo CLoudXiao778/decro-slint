@@ -1054,11 +1054,14 @@ export component AppWindow inherits Window {
     in-out property <string> search-kind: "song";
     in-out property <string> search-text: "";
     in property <string> search-query: "";
+    in property <string> search-lyric-query: "";
     in property <bool> search-loading;
     in-out property <int> search-focus-tick;
     private property <bool> search-active: !root.search-text.is-empty
-        && root.search-query == root.search-text
-        && !root.search-loading;
+        && !root.search-loading
+        && (root.search-kind == "lyric"
+            ? root.search-lyric-query == root.search-text
+            : root.search-query == root.search-text);
     in-out property <bool> playlist-dialog-open;
     in-out property <string> playlist-dialog-mode: "create";
     in-out property <string> playlist-dialog-text: "";
@@ -1260,7 +1263,7 @@ export component AppWindow inherits Window {
                     }
                     search-trigger-tap := TouchArea {
                         clicked => {
-                            root.nav("search");
+                            if root.page != "search" { root.nav("search"); }
                             root.search-focus-tick += 1;
                         }
                     }
@@ -1381,7 +1384,7 @@ export component AppWindow inherits Window {
                     NavIcon {
                         icon: @image-url("../assets/icons/search.svg");
                         active: root.page == "search";
-                        clicked => { root.nav("search"); }
+                        clicked => { if root.page != "search" { root.nav("search"); } }
                     }
                     Rectangle { vertical-stretch: 1; }
                     Rectangle {
@@ -1828,7 +1831,7 @@ export component AppWindow inherits Window {
                             PillButton { label: "歌词"; width: 84px; primary: root.search-kind == "lyric";
                             clicked => {
                                 root.search-kind = "lyric";
-                                if !root.search-text.is-empty && !root.search-loading { root.search(root.search-text, "lyric"); }
+                                if !root.search-text.is-empty && !root.search-loading && root.search-lyric-query != root.search-text { root.search(root.search-text, "lyric"); }
                             } }
                         }
 
@@ -2436,6 +2439,7 @@ export component AppWindow inherits Window {
                 icon-size: 22px;
                 button-size: 40px;
                 background-color: transparent;
+                tint: Theme.text;
                 clicked => { root.toggle-play(); }
             }
             dock-next := RoundIconButton {
@@ -2443,6 +2447,7 @@ export component AppWindow inherits Window {
                 icon-size: 20px;
                 button-size: 40px;
                 background-color: transparent;
+                tint: Theme.text;
                 clicked => { root.next(); }
             }
         }

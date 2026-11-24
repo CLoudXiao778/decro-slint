@@ -280,6 +280,7 @@ static ne_resp *finish(ne_http_resp *h) {
     if (!h || h->status == 0 || h->err) {
         r->code = 520;
         r->body = ne_xstrdup(h && h->err ? h->err : "transport error");
+        r->body_len = strlen(r->body);
         r->err = 1;
     } else {
         jar_sync_set_cookies(h ? h->set_cookies : NULL);

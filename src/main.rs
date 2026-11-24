@@ -451,6 +451,12 @@ fn spawn_audio() -> AudioHandle {
                 }
                 Ok(AudioCmd::Volume(value)) => sink.set_volume(value),
                 Ok(AudioCmd::Seek { value, token }) => {
+                    // Duration::from_secs_f32 panics on NaN/inf, and a
+                    // malformed LRC timestamp can reach this path.
+                    if !value.is_finite() {
+                        logger::log("warn", "audio", "ignored non-finite seek");
+                        continue;
+                    }
                     if token == current_token && loaded {
                         let ceiling = decoded_duration
                             .map(|duration| (duration - 0.25).max(0.0))
@@ -1031,8 +1037,6 @@ fn set_media_playing(playing: bool) {
     }
 }
 
-static SHUTDOWN_SAVED: AtomicBool = AtomicBool::new(false);
-
 fn current_position(
     audio: &AudioHandle,
     player: &Arc<Mutex<Player>>,
@@ -1060,20 +1064,25 @@ fn current_position(
 fn save_before_exit(player: &Arc<Mutex<Player>>, audio: &AudioHandle, generation: &Arc<AtomicU64>) {
     let position = current_position(audio, player, generation);
     save_player(player, position);
-    SHUTDOWN_SAVED.store(true, Ordering::Relaxed);
 }
 
 #[cfg(windows)]
 fn watch_window_restore() {
     use windows::core::{w, PCWSTR};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow, IsIconic};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+    };
 
     let _ = std::thread::Builder::new()
         .name("decro-window-watch".into())
         .spawn(|| {
             let hwnd = loop {
                 if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::null(), w!("Decro")) } {
-                    break hwnd;
+                    let mut pid = 0u32;
+                    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+                    if pid == std::process::id() {
+                        break hwnd;
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(120));
             };
@@ -1102,19 +1111,13 @@ fn watch_window_restore() {
 fn watch_window_restore() {}
 
 fn schedule_forced_exit() {
-    // Safety net for the portable exe: if the event loop or the audio/player
-    // snapshot ever prevents the normal shutdown path, do not leave a hidden
-    // process locking the folder. Give the synchronous close-path save ample
-    // time; only force-exit if it did not complete.
+    // Safety net for the portable exe: if the event loop does not end the
+    // process, exit anyway so a hidden instance cannot keep locking data/.
+    // The normal path reaches process::exit(0) well before this fires.
     let _ = std::thread::Builder::new()
         .name("decro-exit".into())
         .spawn(|| {
-            for _ in 0..50 {
-                if SHUTDOWN_SAVED.load(Ordering::Relaxed) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            std::thread::sleep(Duration::from_secs(5));
             std::process::exit(0);
         });
 }
@@ -1404,11 +1407,21 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
     };
     let _ = fs::create_dir_all(parent);
     let temporary = path.with_extension(format!("tmp.{}", rand::random::<u64>()));
-    if fs::write(&temporary, bytes).is_err() {
+    if let Err(error) = fs::write(&temporary, bytes) {
+        logger::log(
+            "warn",
+            "state",
+            &format!("write {} failed: {error}", path.display()),
+        );
         let _ = fs::remove_file(&temporary);
         return false;
     }
-    if fs::rename(&temporary, path).is_err() {
+    if let Err(error) = fs::rename(&temporary, path) {
+        logger::log(
+            "warn",
+            "state",
+            &format!("replace {} failed: {error}", path.display()),
+        );
         let _ = fs::remove_file(&temporary);
         return false;
     }
@@ -1452,6 +1465,12 @@ async fn fetch_cover(state: &AppState, url: String) -> Option<PathBuf> {
         if path.metadata().map(|meta| meta.len() > 0).unwrap_or(false) {
             return Some(path);
         }
+    }
+    // Validate before the request goes out; the post-redirect check below
+    // alone would still let a server-chosen URL probe localhost/intranet.
+    let parsed = reqwest::Url::parse(&url).ok()?;
+    if parsed.scheme() != "https" || !parsed.host_str().is_some_and(state::is_allowed_audio_host) {
+        return None;
     }
     let response = state.api.get(&url).send().await.ok()?;
     if !response.status().is_success() {
@@ -2072,6 +2091,11 @@ fn start_track(
             } else {
                 quality_label(&resolved.level).to_string()
             };
+            // A newer play request may have superseded this one (e.g. rapid
+            // quality switches); do not let the old badge win.
+            if generation.load(Ordering::Relaxed) != request {
+                return;
+            }
             update_ui(&ui, move |ui| {
                 if ui.get_current_id().as_str() == quality_track_id.as_str() {
                     ui.set_current_quality(actual_quality.into());
@@ -3193,6 +3217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_library_playlists_total(0);
                     ui.set_search_text("".into());
                     ui.set_search_query("".into());
+                    ui.set_search_lyric_query("".into());
                     ui.set_search_loading(false);
                     ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
                         Vec::<TrackItem>::new(),
@@ -3288,6 +3313,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if ui.get_player_visible() {
                     ui.invoke_close_player();
                 }
+                // A nav cancels the in-flight search (generation bump above);
+                // clear its loading state so the page cannot stay on "正在搜索…".
+                if ui.get_search_loading() {
+                    ui.set_search_loading(false);
+                }
                 switch_page(&ui, &page);
             }
             if page == "library" && logged_in {
@@ -3327,6 +3357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 update_ui(&weak, move |ui| {
                     switch_page(ui, "search");
                     ui.set_search_query("".into());
+                    ui.set_search_lyric_query("".into());
                     ui.set_search_loading(false);
                     ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
                         Vec::<TrackItem>::new(),
@@ -3350,15 +3381,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 return;
             }
-            let display_keyword = keyword.clone();
+            // Keep the previous result models untouched while loading: a nav
+            // can cancel this request, and stale results are less confusing
+            // than a cleared page. Query markers are set when a result lands.
+            let request_keyword = keyword.clone();
             runtime.spawn(async move {
                 update_ui(&weak, move |ui| {
                     switch_page(ui, "search");
-                    ui.set_search_query(display_keyword.into());
                     ui.set_search_loading(true);
-                    ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
-                        Vec::<TrackItem>::new(),
-                    ))));
                     ui.set_status_text("正在搜索…".into());
                 });
                 // Lyric search is a separate endpoint; do not pay for the four
@@ -3379,6 +3409,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 catalog.search_lyric_tracks = tracks;
                             }
                             update_ui(&weak, move |ui| {
+                                ui.set_search_lyric_query(request_keyword.into());
                                 ui.set_search_lyrics(ModelRc::from(Rc::new(VecModel::from(
                                     lyric_result_items_for_ui(&data.lyrics),
                                 ))));
@@ -3387,6 +3418,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                         Err(error) => update_ui(&weak, move |ui| {
+                            ui.set_search_lyric_query(request_keyword.into());
                             ui.set_search_loading(false);
                             ui.set_search_lyrics(ModelRc::from(Rc::new(VecModel::from(Vec::<
                                 LyricResultItem,
@@ -3420,6 +3452,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let song_covers = data.songs.clone();
                         let search_error = data.error.clone();
                         update_ui(&weak, move |ui| {
+                            ui.set_search_query(request_keyword.into());
                             ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(
                                 track_items_for_ui(&data.songs),
                             ))));
@@ -3475,8 +3508,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                         update_ui(&weak, move |ui| {
+                            ui.set_search_query(request_keyword.into());
                             ui.set_search_loading(false);
-                            ui.set_search_query("".into());
+                            ui.set_search_tracks(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                                TrackItem,
+                            >::new(
+                            )))));
+                            ui.set_search_playlists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                                PlaylistItem,
+                            >::new(
+                            )))));
+                            ui.set_search_artists(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                                PlaylistItem,
+                            >::new(
+                            )))));
+                            ui.set_search_albums(ModelRc::from(Rc::new(VecModel::from(Vec::<
+                                PlaylistItem,
+                            >::new(
+                            )))));
                             ui.set_status_text(error.into());
                         });
                     }
@@ -4095,10 +4144,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let catalog = catalog.clone();
         let detail_history = detail_history.clone();
         let detail_generation = detail_generation.clone();
+        let mut last_back = Instant::now() - Duration::from_secs(1);
         ui.on_back_detail(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
+            // Ignore a second back while the previous level is still loading;
+            // otherwise it pops another history entry and skips a level.
+            let now = Instant::now();
+            if now.duration_since(last_back) < Duration::from_millis(400) {
+                return;
+            }
+            last_back = now;
             detail_generation.fetch_add(1, Ordering::Relaxed);
             let kind = ui.get_detail_kind().to_string();
             let previous = detail_history
@@ -4785,6 +4842,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let player = player.clone();
         let generation = generation.clone();
         ui.on_seek(move |value| {
+            if !value.is_finite() {
+                return;
+            }
             let token = generation.load(Ordering::Relaxed);
             let loaded = audio
                 .snapshot
@@ -4810,6 +4870,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let player = player.clone();
         let generation = generation.clone();
         ui.on_seek_lyric(move |time| {
+            if !time.is_finite() {
+                return;
+            }
             let token = generation.load(Ordering::Relaxed);
             let loaded = audio
                 .snapshot
@@ -5645,7 +5708,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = ui.run();
     let position = current_position(&audio, &player, &generation);
     save_player(&player, position);
-    SHUTDOWN_SAVED.store(true, Ordering::Relaxed);
     if let Err(error) = result {
         logger::log(
             "error",

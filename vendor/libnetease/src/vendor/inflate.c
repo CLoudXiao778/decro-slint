@@ -142,7 +142,12 @@ static int codes(inflator *s, const huffman *lencode, const huffman *distcode) {
              * 不能用 memcpy。每次重新取 s->buf：out_byte 可能 realloc。 */
             size_t from = s->len - (size_t)dist;
             int i;
-            for (i = 0; i < len; i++) out_byte(s, s->buf[from + (size_t)i]);
+            for (i = 0; i < len; i++) {
+                /* out_byte stops writing once the output limit is reached, so
+                 * later iterations would read past s->buf without this check. */
+                if (s->err) return -1;
+                out_byte(s, s->buf[from + (size_t)i]);
+            }
             if (s->err) return -1;
         }
     }

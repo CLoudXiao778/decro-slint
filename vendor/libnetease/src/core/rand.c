@@ -29,7 +29,7 @@ uint32_t ne_rand_below(uint32_t n) {
     /* rejection sampling on 32-bit draws */
     uint32_t limit = UINT32_MAX - (UINT32_MAX % n);
     for (;;) {
-        uint32_t v;
+        uint32_t v = 0;
         if (ne_rand_bytes((uint8_t *)&v, sizeof v) != 0) return v % n;
         if (v < limit) return v % n;
     }

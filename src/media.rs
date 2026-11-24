@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+#[cfg(windows)]
 use std::time::Duration;
 
 const CMD_TOGGLE: u8 = 1;
@@ -111,7 +112,8 @@ mod imp {
         THUMBBUTTON, THUMBBUTTONMASK,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateIconIndirect, DestroyIcon, FindWindowW, HICON, ICONINFO, WM_COMMAND,
+        CreateIconIndirect, DestroyIcon, FindWindowW, GetWindowThreadProcessId, HICON, ICONINFO,
+        WM_COMMAND,
     };
 
     enum MediaUpdate {
@@ -208,7 +210,13 @@ mod imp {
     fn find_window() -> Option<HWND> {
         for _ in 0..300 {
             if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::null(), w!("Decro")) } {
-                return Some(hwnd);
+                // FindWindowW searches every process; a second instance (or
+                // any window titled "Decro") must not be mistaken for ours.
+                let mut pid = 0u32;
+                unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+                if pid == std::process::id() {
+                    return Some(hwnd);
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -218,6 +226,8 @@ mod imp {
     struct Taskbar {
         list: ITaskbarList3,
         hwnd: HWND,
+        prev_icon: HICON,
+        next_icon: HICON,
         play_icon: HICON,
         pause_icon: HICON,
         playing: bool,
@@ -253,12 +263,30 @@ mod imp {
             if !added {
                 crate::logger::log("warn", "media", "taskbar thumb buttons were not added");
             }
-            unsafe {
-                let _ = SetWindowSubclass(hwnd, Some(taskbar_subclass_proc), 0xDEC0, 0);
+            // Subclassing is only supported on the thread that owns the
+            // window, so hop back to the UI thread instead of calling
+            // SetWindowSubclass from this worker.
+            let raw_hwnd = hwnd.0 as usize;
+            let posted = slint::invoke_from_event_loop(move || {
+                let hwnd = HWND(raw_hwnd as *mut core::ffi::c_void);
+                let installed =
+                    unsafe { SetWindowSubclass(hwnd, Some(taskbar_subclass_proc), 0xDEC0, 0) };
+                if !installed.as_bool() {
+                    crate::logger::log("warn", "media", "taskbar subclass install failed");
+                }
+            });
+            if posted.is_err() {
+                crate::logger::log(
+                    "warn",
+                    "media",
+                    "taskbar subclass install could not reach the UI thread",
+                );
             }
             Some(Self {
                 list,
                 hwnd,
+                prev_icon,
+                next_icon,
                 play_icon,
                 pause_icon,
                 playing: false,
@@ -342,6 +370,8 @@ mod imp {
     impl Drop for Taskbar {
         fn drop(&mut self) {
             unsafe {
+                let _ = DestroyIcon(self.prev_icon);
+                let _ = DestroyIcon(self.next_icon);
                 let _ = DestroyIcon(self.play_icon);
                 let _ = DestroyIcon(self.pause_icon);
             }
@@ -671,7 +701,7 @@ mod imp {
     }
 
     pub fn copy_text(text: &str) -> bool {
-        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Foundation::{GlobalFree, HANDLE};
         use windows::Win32::System::DataExchange::{
             CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
         };
@@ -687,6 +717,7 @@ mod imp {
                 let handle = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
                 let target = GlobalLock(handle) as *mut u16;
                 if target.is_null() {
+                    let _ = GlobalFree(Some(handle));
                     return Err(windows::core::Error::from_hresult(
                         windows::Win32::Foundation::E_OUTOFMEMORY,
                     ));
@@ -694,9 +725,16 @@ mod imp {
                 std::ptr::copy_nonoverlapping(wide.as_ptr(), target, wide.len());
                 let _ = GlobalUnlock(handle);
                 OpenClipboard(None)?;
-                EmptyClipboard()?;
+                if let Err(error) = EmptyClipboard() {
+                    let _ = CloseClipboard();
+                    let _ = GlobalFree(Some(handle));
+                    return Err(error);
+                }
                 let set = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(handle.0)));
                 let _ = CloseClipboard();
+                if set.is_err() {
+                    let _ = GlobalFree(Some(handle));
+                }
                 set?;
             }
             Ok(())

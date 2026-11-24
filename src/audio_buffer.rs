@@ -17,9 +17,6 @@ use rodio::{Decoder, Source};
 
 /// How much audio to keep decoded ahead of playback.
 pub const PREFETCH_SECONDS: usize = 15;
-/// Default wait before handing the source to the sink, so playback never
-/// starts with an empty buffer.
-const PREFILL_SECONDS: f32 = 1.0;
 /// Amount decoded after a seek before the callback is allowed to continue.
 const SEEK_PREFILL_SECONDS: f32 = 0.5;
 /// Decode/publish in chunks instead of one sample at a time. Keeps lock
@@ -67,10 +64,6 @@ pub struct PrefetchSource {
 }
 
 impl PrefetchSource {
-    pub fn new(decoder: Decoder<BufReader<File>>) -> Self {
-        Self::new_with_prefill(decoder, PREFILL_SECONDS)
-    }
-
     pub fn new_with_prefill(mut decoder: Decoder<BufReader<File>>, prefill_seconds: f32) -> Self {
         let channels = decoder.channels();
         let sample_rate = decoder.sample_rate();
@@ -196,8 +189,9 @@ impl PrefetchSource {
             Err(TryLockError::Poisoned(_)) => return None,
         };
         if state.samples.is_empty() {
-            // A fatal decode error ends the track; a failed seek leaves the
-            // source alive with silence so it is not mistaken for "ended".
+            // `finished` covers EOF and unrecoverable seek failures. The
+            // `error` guard only applies when the decode thread itself could
+            // not be started, where skipping the whole queue would be worse.
             if state.finished && state.error.is_none() {
                 return None;
             }
@@ -402,12 +396,19 @@ fn decode_ahead(decoder: &mut Decoder<BufReader<File>>, shared: &Shared) {
                     // Refill before releasing the audio callback so rodio's
                     // position is not inflated by silence frames.
                     loop {
-                        let len = shared
+                        let (len, done) = shared
                             .state
                             .lock()
-                            .map(|state| state.samples.len())
-                            .unwrap_or(0);
-                        if len >= shared.seek_prefill {
+                            .map(|state| {
+                                (
+                                    state.samples.len(),
+                                    state.finished || state.stop || state.seek.is_some(),
+                                )
+                            })
+                            .unwrap_or((0, true));
+                        // Stop at EOF too: decode_chunk returns true after a
+                        // zero-sample read, which used to spin here forever.
+                        if len >= shared.seek_prefill || done {
                             break;
                         }
                         if !decode_chunk(decoder, &mut chunk, shared) {
@@ -415,7 +416,10 @@ fn decode_ahead(decoder: &mut Decoder<BufReader<File>>, shared: &Shared) {
                         }
                     }
                 } else if let Ok(mut state) = shared.state.lock() {
-                    state.error = Some("解码器不支持跳转到该位置".to_string());
+                    // The decoder cannot seek here. End the stream so the
+                    // player advances instead of emitting silence forever;
+                    // try_seek still reports the error to the caller.
+                    state.finished = true;
                     state.samples.clear();
                 }
                 if let Ok(mut state) = shared.state.lock() {

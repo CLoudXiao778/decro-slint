@@ -107,9 +107,10 @@ fn cstring(value: &str) -> CString {
 }
 
 fn cookie_path() -> CString {
-    // Keep libnetease's jar in memory only. The DPAPI file owned by auth.rs is
-    // the single persistent copy of the session.
-    cstring(if cfg!(windows) { "NUL" } else { "/dev/null" })
+    // Empty path disables the C jar's disk persistence; the DPAPI file owned
+    // by auth.rs is the single persistent copy of the session. The old "NUL"
+    // device trick still made the jar attempt "NUL.tmp<pid>" writes.
+    cstring("")
 }
 
 pub fn init() {
@@ -764,8 +765,20 @@ unsafe fn transport_impl(
                 .collect::<Vec<_>>()
                 .join("\n");
             note_set_cookies(&set_cookies);
+            const MAX_TRANSPORT_BYTES: usize = 16 * 1024 * 1024;
+            if response
+                .content_length()
+                .is_some_and(|len| len > MAX_TRANSPORT_BYTES as u64)
+            {
+                return make_response(
+                    status,
+                    Vec::new(),
+                    None,
+                    Some("response too large".to_string()),
+                );
+            }
             match response.bytes() {
-                Ok(bytes) => make_response(
+                Ok(bytes) if bytes.len() <= MAX_TRANSPORT_BYTES => make_response(
                     status,
                     bytes.to_vec(),
                     if set_cookies.is_empty() {
@@ -774,6 +787,12 @@ unsafe fn transport_impl(
                         Some(set_cookies)
                     },
                     None,
+                ),
+                Ok(_) => make_response(
+                    status,
+                    Vec::new(),
+                    None,
+                    Some("response too large".to_string()),
                 ),
                 Err(error) => make_response(
                     status,

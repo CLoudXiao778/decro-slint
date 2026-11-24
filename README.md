@@ -53,8 +53,8 @@ Decro 的 Slint 原生 UI 便携版。界面按既有 Tauri 版重绘：自定�
 ### 迭代构建（不提升版本号）
 
 - push `main` 自动运行 `cargo fmt --check`、`cargo test`、Windows release 构建并上传 Actions artifact，但不会发布。
-- 设置页 footer 显示 `基础版本+提交短hash`，例如 `0.4.2+18df9b6`。
-- 产物名为 `Decro.Slint_0.4.2-<hash>_portable_x64.zip`，用 hash 区分每次提交。
+- 设置页 footer 显示 `基础版本+提交短hash`，例如 `0.4.3+18df9b6`。
+- 产物名为 `Decro.Slint_0.4.3-<hash>_portable_x64.zip`，用 hash 区分每次提交。
 - 常规功能和修复不修改 `Cargo.toml` 版本，只有积累到值得发布时才提升版本号。
 
 ### 正式发布

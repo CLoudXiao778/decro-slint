@@ -204,10 +204,24 @@ async fn get_json(state: &AppState, path: &str, query: &[(&str, String)]) -> Res
     if !response.status().is_success() {
         return Err(format!("网易云接口返回 HTTP {}", response.status()));
     }
-    let json: Value = response
-        .json()
+    // Cap the body before parsing so a runaway/gzip-bombed response cannot
+    // grow the process without bound.
+    const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_RESPONSE_BYTES)
+    {
+        return Err("网易云响应过大".to_string());
+    }
+    let bytes = response
+        .bytes()
         .await
-        .map_err(|e| format!("网易云响应格式异常: {e}"))?;
+        .map_err(|e| format!("网易云响应读取失败: {e}"))?;
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err("网易云响应过大".to_string());
+    }
+    let json: Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("网易云响应格式异常: {e}"))?;
     check_code(&json)?;
     Ok(json)
 }
@@ -1527,6 +1541,7 @@ fn parse_lrc(text: &str) -> Vec<(f64, String)> {
             if let Some(value) = tag
                 .strip_prefix("offset:")
                 .and_then(|value| value.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite())
             {
                 offset_ms = value;
             } else if let Some(time) = parse_lrc_time(tag) {
@@ -1556,7 +1571,10 @@ fn parse_lrc_time(tag: &str) -> Option<f64> {
     let (minutes, seconds) = tag.split_once(':')?;
     let minutes: f64 = minutes.trim().parse().ok()?;
     let seconds: f64 = seconds.trim().parse().ok()?;
-    Some(minutes * 60.0 + seconds)
+    let time = minutes * 60.0 + seconds;
+    // f64 parsing accepts "NaN"/"inf"; those would later panic when converted
+    // to a Duration for seeking.
+    time.is_finite().then_some(time)
 }
 
 pub async fn lyric(state: &AppState, id: String) -> Result<LyricData, String> {
@@ -1754,5 +1772,12 @@ mod tests {
         let lines = parse_lrc("[offset:500]\n[00:01.00]hello");
         assert_eq!(lines.len(), 1);
         assert!((lines[0].0 - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn lrc_ignores_non_finite_timestamps() {
+        let lines = parse_lrc("[NaN:0]bad\n[inf:0]bad\n[00:01.00]good");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].1, "good");
     }
 }

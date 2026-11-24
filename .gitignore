@@ -1,4 +1,10 @@
 /target/
 /data/
 /portable/
+/dist/
+/sha256.txt
+/release-notes.md
 *.zip
+*.log
+*.exe
+*.pdb
